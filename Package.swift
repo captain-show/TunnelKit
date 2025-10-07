@@ -8,7 +8,6 @@ let package = Package(
     platforms: [
         .iOS(.v15),
         .macOS(.v12),
-        .tvOS(.v17)
     ],
     products: [
         // Products define the executables and libraries a package produces, and make them visible to other packages.
@@ -40,7 +39,7 @@ let package = Package(
     dependencies: [
         // Dependencies declare other packages that this package depends on.
         .package(url: "https://github.com/SwiftyBeaver/SwiftyBeaver", from: "1.9.0"),
-        .package(url: "https://github.com/WireGuard/wireguard-apple", branch: "master"),
+        .package(url: "https://github.com/captain-show/wireguard-apple", branch: "master"),
         .package(url: "https://github.com/captain-show/OpenSSL", branch: "main"),
     ],
     targets: [
