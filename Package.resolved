@@ -3,7 +3,7 @@
     {
       "identity" : "openssl",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/AllDevMan/OpenSSL",
+      "location" : "https://github.com/captain-show/OpenSSL",
       "state" : {
         "branch" : "main",
         "revision" : "203cd283fb22c2455bb56d146941145eee525ab2"
@@ -21,9 +21,10 @@
     {
       "identity" : "wireguard-apple",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/passepartoutvpn/wireguard-apple",
+      "location" : "https://github.com/captain-show/wireguard-apple",
       "state" : {
-        "revision" : "b79f0f150356d8200a64922ecf041dd020140aa0"
+        "branch" : "master",
+        "revision" : "a67e350e1b43365ff1db4e75c51c5f9c196927e7"
       }
     }
   ],
