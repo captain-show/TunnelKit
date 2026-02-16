@@ -38,7 +38,7 @@ let package = Package(
     ],
     dependencies: [
         // Dependencies declare other packages that this package depends on.
-        .package(url: "https://github.com/SwiftyBeaver/SwiftyBeaver", from: "1.9.0"),
+        .package(url: "https://github.com/SwiftyBeaver/SwiftyBeaver", from: "2.1.1"),
         .package(url: "https://github.com/captain-show/wireguard-apple", branch: "master"),
         .package(url: "https://github.com/captain-show/OpenSSL", branch: "main"),
     ],
