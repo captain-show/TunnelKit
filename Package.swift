@@ -32,6 +32,22 @@ let package = Package(
             targets: ["TunnelKitWireGuardAppExtension"]
         ),
         .library(
+            name: "TunnelKitCore",
+            targets: ["TunnelKitCore"]
+        ),
+        .library(
+            name: "TunnelKitWireGuardCore",
+            targets: ["TunnelKitWireGuardCore"]
+        ),
+        .library(
+            name: "TunnelKitWireGuardManager",
+            targets: ["TunnelKitWireGuardManager"]
+        ),
+        .library(
+            name: "__TunnelKitUtils",
+            targets: ["__TunnelKitUtils"]
+        ),
+        .library(
             name: "TunnelKitLZO",
             targets: ["TunnelKitLZO"]
         )

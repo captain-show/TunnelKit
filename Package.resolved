@@ -14,8 +14,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/SwiftyBeaver/SwiftyBeaver",
       "state" : {
-        "revision" : "12b5acf96d98f91d50de447369bd18df74600f1a",
-        "version" : "1.9.6"
+        "revision" : "8cba041db09596183331d123f337d0eb2e6e8e91",
+        "version" : "2.1.1"
       }
     },
     {
@@ -24,7 +24,7 @@
       "location" : "https://github.com/captain-show/wireguard-apple",
       "state" : {
         "branch" : "master",
-        "revision" : "a67e350e1b43365ff1db4e75c51c5f9c196927e7"
+        "revision" : "5f17497d6bd732381077e0392765842c90237dd3"
       }
     }
   ],
