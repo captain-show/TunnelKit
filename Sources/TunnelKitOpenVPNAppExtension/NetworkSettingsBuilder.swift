@@ -32,6 +32,11 @@ import SwiftyBeaver
 private let log = SwiftyBeaver.self
 
 struct NetworkSettingsBuilder {
+    private static let blockedIPv6Address = "fd00::2"
+
+    // iOS ignores interface prefixes narrower than /120 in practice.
+    private static let blockedIPv6PrefixLength = 120
+
     let remoteAddress: String
 
     let localOptions: OpenVPN.Configuration
@@ -101,7 +106,18 @@ extension NetworkSettingsBuilder {
     }
 
     private var routingPolicies: [OpenVPN.RoutingPolicy]? {
-        pullRoutes ? (remoteOptions.routingPolicies ?? localOptions.routingPolicies) : localOptions.routingPolicies
+        var policies = Set(localOptions.routingPolicies ?? [])
+        if pullRoutes {
+            policies.formUnion(remoteOptions.routingPolicies ?? [])
+        }
+        guard !policies.isEmpty else {
+            return nil
+        }
+        return [.IPv4, .IPv6, .blockLocal].filter(policies.contains)
+    }
+
+    var blocksIPv6: Bool {
+        (localOptions.blocksIPv6 ?? false) || (pullRoutes && (remoteOptions.blocksIPv6 ?? false))
     }
 
     private var isIPv4Gateway: Bool {
@@ -203,6 +219,17 @@ extension NetworkSettingsBuilder {
     }
 
     private var computedIPv6Settings: NEIPv6Settings? {
+        if blocksIPv6 {
+            let ipv6Settings = NEIPv6Settings(
+                addresses: [Self.blockedIPv6Address],
+                networkPrefixLengths: [Self.blockedIPv6PrefixLength as NSNumber]
+            )
+            ipv6Settings.includedRoutes = [.default()]
+            ipv6Settings.excludedRoutes = []
+            log.info("Routing.IPv6: Capturing IPv6 locally for immediate no-route rejection")
+            return ipv6Settings
+        }
+
         guard let ipv6 = remoteOptions.ipv6 else {
             return nil
         }
@@ -293,10 +320,9 @@ extension NetworkSettingsBuilder {
             }
         }
 
-        // "hack" for split DNS (i.e. use VPN only for DNS)
-        if !isGateway {
-            dnsSettings?.matchDomains = [""]
-        }
+        // Make the tunnel DNS authoritative for every domain. Split profiles
+        // with explicit search domains narrow this again below.
+        dnsSettings?.matchDomains = [""]
 
         if let domain = dnsDomain {
             log.info("DNS: Using domain: \(domain)")

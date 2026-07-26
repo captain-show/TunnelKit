@@ -260,6 +260,10 @@ extension OpenVPN {
         /// The IPv6 routes if `ipv6` is nil.
         public var routes6: [IPv6Settings.Route]?
 
+        /// Captures IPv6 traffic locally and rejects it instead of forwarding it
+        /// to an IPv4-only VPN server.
+        public var blocksIPv6: Bool?
+
         /// Set false to ignore DNS settings, even when pushed.
         public var isDNSEnabled: Bool?
 
@@ -368,6 +372,7 @@ extension OpenVPN {
                 ipv6: ipv6,
                 routes4: routes4,
                 routes6: routes6,
+                blocksIPv6: blocksIPv6,
                 isDNSEnabled: isDNSEnabled,
                 dnsProtocol: dnsProtocol,
                 dnsServers: dnsServers,
@@ -484,6 +489,9 @@ extension OpenVPN {
 
         /// - Seealso: `ConfigurationBuilder.routes6`
         public let routes6: [IPv6Settings.Route]?
+
+        /// - Seealso: `ConfigurationBuilder.blocksIPv6`
+        public let blocksIPv6: Bool?
 
         /// - Seealso: `ConfigurationBuilder.isDNSEnabled`
         public let isDNSEnabled: Bool?
@@ -621,6 +629,7 @@ extension OpenVPN.Configuration {
         builder.ipv6 = ipv6
         builder.routes4 = routes4
         builder.routes6 = routes6
+        builder.blocksIPv6 = blocksIPv6
         builder.isDNSEnabled = isDNSEnabled
         builder.dnsProtocol = dnsProtocol
         builder.dnsServers = dnsServers

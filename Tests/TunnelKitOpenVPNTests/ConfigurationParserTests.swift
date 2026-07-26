@@ -99,6 +99,16 @@ class ConfigurationParserTests: XCTestCase {
         XCTAssertEqual(Set(parsed.routingPolicies!), Set([.IPv4, .blockLocal]))
     }
 
+    func testBlockIPv6() throws {
+        let result = try OpenVPN.ConfigurationParser.parsed(
+            fromLines: ["block-ipv6"],
+            returnsStripped: true
+        )
+
+        XCTAssertEqual(result.configuration.blocksIPv6, true)
+        XCTAssertEqual(result.strippedLines, ["block-ipv6"])
+    }
+
     func testConnectionBlock() throws {
         let lines = ["<connection>", "</connection>"]
         XCTAssertThrowsError(try OpenVPN.ConfigurationParser.parsed(fromLines: lines))

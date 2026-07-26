@@ -71,6 +71,7 @@ class AppExtensionTests: XCTestCase {
         builder.digest = .sha256
         builder.remotes = [.init(hostname, .init(.udp, port))]
         builder.mtu = 1230
+        builder.blocksIPv6 = true
 
         var cfg = OpenVPN.ProviderConfiguration("", appGroup: appGroup, configuration: builder.build())
         cfg.username = credentials.username
@@ -97,6 +98,7 @@ class AppExtensionTests: XCTestCase {
         XCTAssertEqual(ovpn?["digest"] as? String, cfg.configuration.digest?.rawValue)
         XCTAssertEqual(ovpn?["ca"] as? String, cfg.configuration.ca?.pem)
         XCTAssertEqual(ovpn?["mtu"] as? Int, cfg.configuration.mtu)
+        XCTAssertEqual(ovpn?["blocksIPv6"] as? Bool, true)
         XCTAssertEqual(ovpn?["renegotiatesAfter"] as? TimeInterval, cfg.configuration.renegotiatesAfter)
     }
 
@@ -199,6 +201,77 @@ class AppExtensionTests: XCTestCase {
         XCTAssertEqual(builder.build().dnsSettings?.servers, fallbackServers)
     }
 
+    func testIPv6BlockingCapturesDefaultRouteAndMakesDNSAuthoritative() throws {
+        var localBuilder = OpenVPN.ConfigurationBuilder()
+        localBuilder.blocksIPv6 = true
+        localBuilder.dnsServers = ["10.42.42.53"]
+        localBuilder.routingPolicies = [.IPv4]
+
+        var remoteBuilder = OpenVPN.ConfigurationBuilder()
+        remoteBuilder.ipv4 = IPv4Settings(
+            address: "10.8.0.2",
+            addressMask: "255.255.255.0",
+            defaultGateway: "10.8.0.1"
+        )
+        remoteBuilder.routingPolicies = [.blockLocal]
+
+        let builder = NetworkSettingsBuilder(
+            remoteAddress: "198.51.100.1",
+            localOptions: localBuilder.build(),
+            remoteOptions: remoteBuilder.build()
+        )
+        let settings = builder.build()
+        let ipv4Settings = try XCTUnwrap(settings.ipv4Settings)
+        let ipv6Settings = try XCTUnwrap(settings.ipv6Settings)
+        let ipv4Routes = ipv4Settings.includedRoutes ?? []
+        let ipv6Routes = ipv6Settings.includedRoutes ?? []
+        let defaultIPv4Route = try XCTUnwrap(ipv4Routes.first)
+        let defaultIPv6Route = try XCTUnwrap(ipv6Routes.first)
+
+        XCTAssertTrue(builder.blocksIPv6)
+        XCTAssertEqual(defaultIPv4Route.destinationAddress, "0.0.0.0")
+        XCTAssertEqual(defaultIPv4Route.destinationSubnetMask, "0.0.0.0")
+        XCTAssertEqual(defaultIPv4Route.gatewayAddress, "10.8.0.1")
+        XCTAssertEqual(defaultIPv6Route.destinationAddress, "::")
+        XCTAssertEqual(defaultIPv6Route.destinationNetworkPrefixLength, 0)
+        XCTAssertNil(defaultIPv6Route.gatewayAddress)
+        XCTAssertEqual(ipv6Settings.addresses, ["fd00::2"])
+        XCTAssertEqual(ipv6Settings.networkPrefixLengths, [120])
+        XCTAssertEqual(settings.dnsSettings?.servers, ["10.42.42.53"])
+        XCTAssertEqual(settings.dnsSettings?.matchDomains, [""])
+    }
+
+    func testIPv6NoRouteResponseSwapsAddressesAndHasValidChecksum() throws {
+        let sourceAddress: [UInt8] = [
+            0xfd, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 2
+        ]
+        let destinationAddress: [UInt8] = [
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 1
+        ]
+        var requestBytes = [UInt8](repeating: 0, count: 48)
+        requestBytes[0] = 0x60
+        requestBytes[5] = 8
+        requestBytes[6] = 17
+        requestBytes[7] = 64
+        requestBytes.replaceSubrange(8..<24, with: sourceAddress)
+        requestBytes.replaceSubrange(24..<40, with: destinationAddress)
+        requestBytes.replaceSubrange(40..<48, with: [0x12, 0x34, 0x00, 0x35, 0, 8, 0, 0])
+
+        let response = try XCTUnwrap(IPv6NoRoutePacket.response(to: Data(requestBytes)))
+        let responseBytes = Array(response)
+
+        XCTAssertEqual(responseBytes[0] >> 4, 6)
+        XCTAssertEqual(responseBytes[6], 58)
+        XCTAssertEqual(Array(responseBytes[8..<24]), destinationAddress)
+        XCTAssertEqual(Array(responseBytes[24..<40]), sourceAddress)
+        XCTAssertEqual(responseBytes[40], 1)
+        XCTAssertEqual(responseBytes[41], 0)
+        XCTAssertEqual(Array(responseBytes[48...]), requestBytes)
+        XCTAssertEqual(icmpv6ChecksumSum(responseBytes), 0xffff)
+    }
+
     func testEncryptedDNSRejectsImplicitDNSProbeEvenWithExplicitFallback() {
         var options = ConnectionValidationOptions()
         options.policy = .any
@@ -239,6 +312,35 @@ class AppExtensionTests: XCTestCase {
         ).filter {
             $0.lastPathComponent.hasPrefix("ca-") && $0.pathExtension == "pem"
         }
+    }
+
+    private func icmpv6ChecksumSum(_ packet: [UInt8]) -> UInt16 {
+        let payloadLength = Int(packet[4]) << 8 | Int(packet[5])
+        var checksumBytes = [UInt8]()
+        checksumBytes.append(contentsOf: packet[8..<40])
+        checksumBytes.append(contentsOf: [
+            UInt8((payloadLength >> 24) & 0xff),
+            UInt8((payloadLength >> 16) & 0xff),
+            UInt8((payloadLength >> 8) & 0xff),
+            UInt8(payloadLength & 0xff),
+            0, 0, 0, 58
+        ])
+        checksumBytes.append(contentsOf: packet[40...])
+
+        var sum: UInt32 = 0
+        var byteIndex = 0
+        while byteIndex + 1 < checksumBytes.count {
+            sum += UInt32(checksumBytes[byteIndex]) << 8
+                | UInt32(checksumBytes[byteIndex + 1])
+            byteIndex += 2
+        }
+        if byteIndex < checksumBytes.count {
+            sum += UInt32(checksumBytes[byteIndex]) << 8
+        }
+        while sum > 0xffff {
+            sum = (sum & 0xffff) + (sum >> 16)
+        }
+        return UInt16(sum)
     }
 
     func testDNSAddressConversion() {

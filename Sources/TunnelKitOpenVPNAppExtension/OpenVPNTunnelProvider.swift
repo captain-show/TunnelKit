@@ -1086,6 +1086,12 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         cfg._appexSetServerConfiguration(session.serverConfiguration() as? OpenVPN.Configuration)
 
         log.info("Stage: applying network settings")
+        let blocksIPv6 = NetworkSettingsBuilder(
+            remoteAddress: remoteAddress,
+            localOptions: session.configuration,
+            remoteOptions: options,
+            fallbackDNSServers: fallbackDNSServers
+        ).blocksIPv6
         bringNetworkUp(remoteAddress: remoteAddress, localOptions: session.configuration, remoteOptions: options) { (error) in
 
             // hop from XPC/system queue back to the tunnel queue
@@ -1109,7 +1115,12 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
                 }
 
                 log.info("Tunnel interface is now UP")
-                session.setTunnel(tunnel: NETunnelInterface(impl: self.packetFlow))
+                let networkInterface = NETunnelInterface(impl: self.packetFlow)
+                if blocksIPv6 {
+                    session.setTunnel(tunnel: IPv6BlockingTunnelInterface(wrapping: networkInterface))
+                } else {
+                    session.setTunnel(tunnel: networkInterface)
+                }
                 self.beginValidation(
                     session: session,
                     remoteAddress: remoteAddress,

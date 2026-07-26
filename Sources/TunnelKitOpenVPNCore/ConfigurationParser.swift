@@ -121,6 +121,8 @@ extension OpenVPN {
 
             static let routeNoPull = NSRegularExpression("^route-nopull")
 
+            static let blockIPv6 = NSRegularExpression("^block-ipv6(?:\\s|$)")
+
             // MARK: Extra
 
             static let xorInfo = NSRegularExpression("^scramble +(xormask|xorptrpos|reverse|obfuscate)[\\s]?([^\\s]+)?")
@@ -298,6 +300,7 @@ extension OpenVPN {
             var optProxyBypass: [String]?
             var optRedirectGateway: Set<RedirectGateway>?
             var optRouteNoPull: Bool?
+            var optBlocksIPv6: Bool?
             //
             var optXorMethod: XORMethod?
 
@@ -732,6 +735,10 @@ extension OpenVPN {
                 Regex.routeNoPull.enumerateSpacedComponents(in: line) { _ in
                     optRouteNoPull = true
                 }
+                Regex.blockIPv6.enumerateSpacedComponents(in: line) { _ in
+                    isHandled = true
+                    optBlocksIPv6 = true
+                }
 
                 // MARK: Extra
 
@@ -934,6 +941,7 @@ extension OpenVPN {
             sessionBuilder.routes6 = optRoutes6?.map {
                 IPv6Settings.Route($0.0, $0.1, $0.2)
             }
+            sessionBuilder.blocksIPv6 = optBlocksIPv6
 
             sessionBuilder.dnsServers = optDNSServers
             sessionBuilder.dnsDomain = optDomain
