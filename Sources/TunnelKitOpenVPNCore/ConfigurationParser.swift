@@ -89,7 +89,7 @@ extension OpenVPN {
 
             // MARK: Server
 
-            public static let authToken = NSRegularExpression("^auth-token +[a-zA-Z0-9/=+]+")
+            public static let authToken = NSRegularExpression("^auth-token(?: +[^,\\s]+)?")
 
             static let peerId = NSRegularExpression("^peer-id +[0-9]+")
 
@@ -302,8 +302,20 @@ extension OpenVPN {
             var optXorMethod: XORMethod?
 
             log.verbose("Configuration file:")
+            var isLoggingInsideBlock = false
             for line in lines {
-                log.verbose(line)
+                // never log the contents of <ca>/<cert>/<key>/<tls-auth>/<tls-crypt>
+                // blocks: they contain private key material
+                if line.hasPrefix("</") {
+                    isLoggingInsideBlock = false
+                    log.verbose(line)
+                } else if line.hasPrefix("<") {
+                    isLoggingInsideBlock = true
+                    log.verbose(line)
+                    log.verbose("\t<masked block content>")
+                } else if !isLoggingInsideBlock {
+                    log.verbose(ConfigurationParser.sanitizedForLogging(line))
+                }
 
                 var isHandled = false
                 var strippedLine = line
@@ -592,7 +604,10 @@ extension OpenVPN {
                 // MARK: Server
 
                 Regex.authToken.enumerateSpacedArguments(in: line) {
-                    optAuthToken = $0[0]
+                    guard let token = $0.first, !token.isEmpty else {
+                        return
+                    }
+                    optAuthToken = token
                 }
                 Regex.peerId.enumerateSpacedArguments(in: line) {
                     optPeerId = UInt32($0[0])
@@ -765,25 +780,6 @@ extension OpenVPN {
             }
 
             // MARK: Post-processing
-
-            // ensure that non-nil network settings also imply non-empty
-            if let array = optRoutes4 {
-                assert(!array.isEmpty)
-            }
-            if let array = optRoutes6 {
-                assert(!array.isEmpty)
-            }
-            if let array = optDNSServers {
-                assert(!array.isEmpty)
-            }
-            if let array = optSearchDomains {
-                assert(!array.isEmpty)
-            }
-            if let array = optProxyBypass {
-                assert(!array.isEmpty)
-            }
-
-            //
 
             var sessionBuilder = ConfigurationBuilder()
 
@@ -986,6 +982,14 @@ extension OpenVPN {
                 strippedLines: optStrippedLines,
                 warning: optWarning
             )
+        }
+
+        private static func sanitizedForLogging(_ line: String) -> String {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed == "auth-token" || trimmed.hasPrefix("auth-token ") else {
+                return line
+            }
+            return "auth-token <redacted>"
         }
 
         private static func normalizeEncryptedPEMBlock(block: inout [String]) {

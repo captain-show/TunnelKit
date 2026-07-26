@@ -58,7 +58,7 @@ extension OpenVPN {
     }
 
     /// Encryption algorithm.
-    public enum Cipher: String, Codable, CustomStringConvertible {
+    public enum Cipher: String, Codable, CustomStringConvertible, Sendable {
 
         // WARNING: must match OpenSSL algorithm names
 
@@ -110,7 +110,7 @@ extension OpenVPN {
     }
 
     /// Message digest algorithm.
-    public enum Digest: String, Codable, CustomStringConvertible {
+    public enum Digest: String, Codable, CustomStringConvertible, Sendable {
 
         // WARNING: must match OpenSSL algorithm names
 
@@ -140,7 +140,7 @@ extension OpenVPN {
     }
 
     /// Routing policy.
-    public enum RoutingPolicy: String, Codable {
+    public enum RoutingPolicy: String, Codable, Sendable {
 
         /// All IPv4 traffic goes through the VPN.
         case IPv4
@@ -153,7 +153,7 @@ extension OpenVPN {
     }
 
     /// Settings that can be pulled from server.
-    public enum PullMask: String, Codable, CaseIterable {
+    public enum PullMask: String, Codable, CaseIterable, Sendable {
 
         /// Routes and gateways.
         case routes
@@ -388,7 +388,7 @@ extension OpenVPN {
     }
 
     /// The immutable configuration for `OpenVPNSession`.
-    public struct Configuration: Codable, Equatable {
+    public struct Configuration: Codable, Equatable, Sendable {
         struct Fallback {
             static let cipher: Cipher = .aes128cbc
 
@@ -645,10 +645,11 @@ extension OpenVPN.Configuration {
 extension OpenVPN.Configuration {
     public func print(isLocal: Bool) {
         if isLocal {
-            guard let remotes = remotes else {
-                fatalError("No remotes set")
+            if let remotes = remotes {
+                log.info("\tRemotes: \(remotes)")
+            } else {
+                log.warning("\tRemotes: none set")
             }
-            log.info("\tRemotes: \(remotes)")
         }
 
         if !isLocal {

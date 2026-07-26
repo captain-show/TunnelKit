@@ -45,8 +45,8 @@ public protocol VPN {
      */
     func install(
         _ tunnelBundleIdentifier: String,
-        configuration: Configuration,
-        extra: Extra?
+        configuration: sending Configuration,
+        extra: sending Extra?
     ) async throws
 
     /**
@@ -68,8 +68,8 @@ public protocol VPN {
      */
     func reconnect(
         _ tunnelBundleIdentifier: String,
-        configuration: Configuration,
-        extra: Extra?,
+        configuration: sending Configuration,
+        extra: sending Extra?,
         after: DispatchTimeInterval
     ) async throws
 
@@ -86,20 +86,38 @@ public protocol VPN {
 
 extension DispatchTimeInterval {
 
+    /// Returns self as a Swift concurrency duration.
+    public var duration: Duration {
+        switch self {
+        case .seconds(let seconds):
+            return .seconds(seconds)
+        case .milliseconds(let milliseconds):
+            return .milliseconds(milliseconds)
+        case .microseconds(let microseconds):
+            return .microseconds(microseconds)
+        case .nanoseconds(let nanoseconds):
+            return .nanoseconds(nanoseconds)
+        case .never:
+            return .zero
+        @unknown default:
+            return .zero
+        }
+    }
+
     /// Returns self in nanoseconds.
     public var nanoseconds: UInt64 {
         switch self {
-        case .seconds(let sec):
-            return UInt64(sec) * NSEC_PER_SEC
+        case .seconds(let seconds):
+            return Self.saturatedNanoseconds(seconds, multiplier: NSEC_PER_SEC)
 
-        case .milliseconds(let msec):
-            return UInt64(msec) * NSEC_PER_MSEC
+        case .milliseconds(let milliseconds):
+            return Self.saturatedNanoseconds(milliseconds, multiplier: NSEC_PER_MSEC)
 
-        case .microseconds(let usec):
-            return UInt64(usec) * NSEC_PER_USEC
+        case .microseconds(let microseconds):
+            return Self.saturatedNanoseconds(microseconds, multiplier: NSEC_PER_USEC)
 
-        case .nanoseconds(let nsec):
-            return UInt64(nsec)
+        case .nanoseconds(let nanoseconds):
+            return nanoseconds > 0 ? UInt64(nanoseconds) : 0
 
         case .never:
             return 0
@@ -107,5 +125,13 @@ extension DispatchTimeInterval {
         @unknown default:
             return 0
         }
+    }
+
+    private static func saturatedNanoseconds(_ value: Int, multiplier: UInt64) -> UInt64 {
+        guard value > 0 else {
+            return 0
+        }
+        let (nanoseconds, overflow) = UInt64(value).multipliedReportingOverflow(by: multiplier)
+        return overflow ? .max : nanoseconds
     }
 }

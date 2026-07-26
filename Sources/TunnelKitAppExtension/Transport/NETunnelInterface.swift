@@ -41,6 +41,22 @@ import SwiftyBeaver
 
 private let log = SwiftyBeaver.self
 
+private final class UncheckedSendableCallback<Callback>: @unchecked Sendable {
+    let callback: Callback
+
+    init(_ callback: Callback) {
+        self.callback = callback
+    }
+}
+
+private final class WeakReference<Object: AnyObject>: @unchecked Sendable {
+    weak var value: Object?
+
+    init(_ value: Object) {
+        self.value = value
+    }
+}
+
 /// `TunnelInterface` implementation via NetworkExtension.
 public class NETunnelInterface: TunnelInterface {
     private weak var impl: NEPacketTunnelFlow?
@@ -62,12 +78,17 @@ public class NETunnelInterface: TunnelInterface {
     }
 
     private func loopReadPackets(_ queue: DispatchQueue, _ handler: @escaping ([Data]?, Error?) -> Void) {
+        let interface = WeakReference(self)
+        let callback = UncheckedSendableCallback(handler)
 
         // WARNING: runs in NEPacketTunnelFlow queue
-        impl?.readPackets { [weak self] (packets, _) in
-            queue.sync {
-                self?.loopReadPackets(queue, handler)
-                handler(packets, nil)
+        impl?.readPackets { packets, _ in
+            queue.async {
+                guard let interface = interface.value else {
+                    return
+                }
+                interface.loopReadPackets(queue, callback.callback)
+                callback.callback(packets, nil)
             }
         }
     }

@@ -29,7 +29,7 @@ import CTunnelKitOpenVPNCore
 extension OpenVPN {
 
     /// Defines the type of compression algorithm.
-    public enum CompressionAlgorithm: Int, Codable, CustomStringConvertible {
+    public enum CompressionAlgorithm: Int, Codable, CustomStringConvertible, Sendable {
 
         /// No compression.
         case disabled
@@ -41,10 +41,16 @@ extension OpenVPN {
         case other
 
         public var native: CompressionAlgorithmNative {
-            guard let val = CompressionAlgorithmNative(rawValue: rawValue) else {
-                fatalError("Unhandled CompressionAlgorithm bridging")
+            switch self {
+            case .disabled:
+                return .disabled
+
+            case .LZO:
+                return .LZO
+
+            case .other:
+                return .other
             }
-            return val
         }
 
         // MARK: CustomStringConvertible

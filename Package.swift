@@ -1,4 +1,4 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -6,11 +6,10 @@ import PackageDescription
 let package = Package(
     name: "TunnelKit",
     platforms: [
-        .iOS(.v15),
-        .macOS(.v12),
+        .iOS(.v17),
+        .macOS(.v14),
     ],
     products: [
-        // Products define the executables and libraries a package produces, and make them visible to other packages.
         .library(
             name: "TunnelKit",
             targets: ["TunnelKit"]
@@ -53,14 +52,17 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Dependencies declare other packages that this package depends on.
         .package(url: "https://github.com/SwiftyBeaver/SwiftyBeaver", from: "2.1.1"),
-        .package(url: "https://github.com/captain-show/wireguard-apple", branch: "master"),
-        .package(url: "https://github.com/captain-show/OpenSSL", branch: "main"),
+        .package(
+            url: "https://github.com/ridgelineinternational/wireguard-apple-xcframework",
+            exact: "0.0.7"
+        ),
+        .package(
+            url: "https://github.com/passepartoutvpn/openssl-apple",
+            exact: "3.6.300"
+        ),
     ],
     targets: [
-        // Targets are the basic building blocks of a package. A target can define a module or a test suite.
-        // Targets can depend on other targets in this package, and on products in packages this package depends on.
         .target(
             name: "TunnelKit",
             dependencies: [
@@ -131,7 +133,7 @@ let package = Package(
             dependencies: [
                 "__TunnelKitUtils",
                 "TunnelKitCore",
-                .product(name: "WireGuardKit", package: "wireguard-apple"),
+                .product(name: "WireGuardKit", package: "wireguard-apple-xcframework"),
                 "SwiftyBeaver"
             ]),
         .target(
@@ -167,7 +169,7 @@ let package = Package(
             dependencies: [
                 "CTunnelKitCore",
                 "CTunnelKitOpenVPNCore",
-                "OpenSSL"
+                .product(name: "openssl-apple", package: "openssl-apple")
             ]),
         .target(
             name: "__TunnelKitUtils",
@@ -202,6 +204,21 @@ let package = Package(
             dependencies: [
                 "TunnelKitCore",
                 "TunnelKitLZO"
+            ]),
+        .testTarget(
+            name: "TunnelKitManagerTests",
+            dependencies: [
+                "TunnelKitManager"
+            ]),
+        .testTarget(
+            name: "TunnelKitWireGuardTests",
+            dependencies: [
+                "TunnelKitWireGuardManager"
             ])
     ]
 )
+
+// The whole package is built in the Swift 6 language mode (see
+// swift-tools-version above), so every first-party Swift target gets complete
+// concurrency checking enforced as errors. No per-target StrictConcurrency
+// opt-in is needed — the language mode subsumes it.

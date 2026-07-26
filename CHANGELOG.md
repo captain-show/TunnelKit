@@ -7,9 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+- Fail-closed connection validation, configured through `ProviderConfiguration.connectionValidation` (`.default`, `.strict`, `.disabled`). OpenVPN's default requires a valid external DNS answer for `example.com` through tunnel DNS and the provider continuously rechecks end-to-end access after connecting. Gateway replies and unrelated inbound traffic remain diagnostics and never establish end-to-end connectivity.
+- WireGuard validation now selects peers from the routes used by configured probes, actively initiates keepalive traffic, verifies a fresh handshake for the current attempt, rechecks it after stabilization and monitors handshake freshness after connecting. On iOS 18+ and macOS 15+, enabled DNS and ICMP probes run through the tunnel's `virtualInterface` and are also monitored continuously.
+- `ConnectionStateMachine` and `ConnectionState`: an explicit, thread-safe lifecycle (`idle`, `preparing`, `connecting`, `negotiating`, `validating`, `connected`, `disconnecting`, `disconnected`, `failed`) with attempt tokens that reject late callbacks from superseded attempts.
+- `ConnectionError`: stable error codes, lifecycle stage, optional underlying error and sanitized diagnostics. `OpenVPNConnectionError` and `WireGuardConnectionError` persist secret-free details across the app/extension process boundary while retaining the legacy protocol error summaries.
+- `WireGuardRuntimeInfo`: per-peer traffic counters and handshake timestamps parsed from WireGuard runtime configuration.
+- `NetworkExtensionVPN.currentStatus(ofTunnelBundleIdentifier:)`, which reports preference-loading failures instead of conflating them with an uninstalled tunnel.
+- New legacy error cases: `TunnelKitOpenVPNError.connectionValidationFailed`, `handshakeTimeout`, `serverUnreachable`, `cancelled` and `internalError`; `TunnelKitWireGuardError.handshakeTimeout`, `connectionValidationFailed` and `cancelled`.
+
 ### Changed
 
+- Minimum deployment targets raised to iOS 17.6 (matching the WireGuard binary's actual load command) and macOS 14; the package and Demo now build in Swift 6 language mode with Xcode 16+.
+- **Breaking:** tvOS support and Demo targets were removed because the modern prebuilt WireGuardKit dependency only provides iOS and macOS slices. Keeping the old tvOS target would leave a scheme that cannot link.
+- OpenSSL upgraded to OpenSSL 3.6.2 through the newest published `openssl-apple` XCFramework package, pinned at version 3.6.300.
+- WireGuardKit now comes from the pinned `wireguard-apple-xcframework` 0.0.7 binary package. SwiftPM consumers no longer need Go, `make`, an external Xcode build target or a custom bridge script.
 - OpenVPN: Opt out of platform info in peer info. [#409](https://github.com/passepartoutvpn/tunnelkit/pull/409)
+- `DNSResolver` now uses the asynchronous `DNSServiceGetAddrInfo` API instead of deprecated `CFHost`, supports IPv4 and IPv6 callback batches, enforces an overall timeout and completes exactly once even when cancelled.
+- **Breaking:** `DNSError` adds `invalidHostname`, `invalidTimeout` and `service(code:)` so callers receive the real validation or DNS-SD failure. Exhaustive switches over the enum must handle the new cases.
+- **Breaking:** Removed public `NETCPSocket` and `NEUDPSocket`, and replaced the internal `NETCPLink`/`NEUDPLink` transports. Migrate concrete socket construction to `NWConnectionSocket` with `NWEndpoint` and `NWParameters`; the transport stack now uses modern `NWConnection` throughout.
+- WireGuard enabled validation is supported only on iOS 18+ and macOS 15+, where probes can be bound to `virtualInterface`. On iOS 17.6 and macOS 14, `.default` and other enabled validation configurations fail closed with `ConnectionError.Code.unsupportedConfiguration`; set `.disabled` only when the legacy unverified behavior is explicitly required.
+- `NetworkExtensionVPN.reconnect` is cancellation-aware, waits until the previous tunnel is stopped and throws `TunnelKitManagerError.disconnectionTimedOut` after five seconds instead of starting over a disconnect still in progress. Disconnected status notifications now include NetworkExtension's last disconnect error when available.
+- Optional notification accessors (`vpnStatusIfPresent`, `vpnIsEnabledIfPresent`, `vpnErrorIfPresent`) distinguish missing payloads without assertions; the compatibility accessors return safe fallback values.
+- `ConnectionStrategy.init` is now failable instead of trapping when the configuration has no remotes.
+
+### Fixed
+
+- WireGuard: `startTunnel` no longer crashes (`fatalError`) on a malformed provider configuration; it fails with a typed error.
+- WireGuard: start completion is owned by one attempt, selected-peer handshakes must be newer than that attempt and stale runtime data can no longer produce a false `connected` result.
+- OpenVPN: protocol-invariant violations triggered by a buggy or malicious server (missing session id, encryption setup without auth, unresolvable link address) now shut the session down with a typed error instead of crashing the tunnel process.
+- OpenVPN: DNS, socket, session, network-settings, validation and stop callbacks are fenced to their owning attempt; stale callbacks can no longer complete or tear down a newer connection.
+- OpenVPN: full-tunnel profiles without pushed DNS now apply the advertised fallback DNS servers; DoH/DoT profiles must use a compatible explicit validation probe instead of treating plaintext UDP/53 as encrypted-DNS evidence.
+- OpenVPN: established connections enter `reasserting` only after transport or continuous end-to-end monitoring remains unavailable for the configured grace period; transient viability and `betterPath` notifications no longer cause status flapping or reconnect loops.
+- WireGuard: persistent connectivity loss now enters `reasserting` while the backend recovers in place instead of cancelling the provider and triggering an on-demand disconnect/connect loop.
+- OpenVPN: the stop watchdog and normal shutdown path can no longer invoke the stop completion handler twice.
+- OpenVPN: authentication tokens in `PUSH_REPLY` messages are fully redacted before logging.
+- Fixed races in DNS resolution completion and in provider start/stop completion handling.
 
 ## 6.3.2 (2024-01-05)
 

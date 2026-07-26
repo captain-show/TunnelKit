@@ -24,13 +24,13 @@
 //
 
 import Foundation
-import NetworkExtension
+@preconcurrency import NetworkExtension
 import SwiftyBeaver
 
 private let log = SwiftyBeaver.self
 
 /// `VPN` based on the NetworkExtension framework.
-public class NetworkExtensionVPN: VPN {
+public class NetworkExtensionVPN: VPN, @unchecked Sendable {
 
     /**
      Initializes a provider.
@@ -48,13 +48,17 @@ public class NetworkExtensionVPN: VPN {
     // MARK: Public
 
     public func prepare() async {
-        _ = try? await NETunnelProviderManager.loadAllFromPreferences()
+        do {
+            _ = try await NETunnelProviderManager.loadAllFromPreferences()
+        } catch {
+            log.error("Unable to load VPN preferences: \(error)")
+        }
     }
 
     public func install(
         _ tunnelBundleIdentifier: String,
-        configuration: NetworkExtensionConfiguration,
-        extra: NetworkExtensionExtra?
+        configuration: sending NetworkExtensionConfiguration,
+        extra: sending NetworkExtensionExtra?
     ) async throws {
         _ = try await installReturningManager(
             tunnelBundleIdentifier,
@@ -68,17 +72,18 @@ public class NetworkExtensionVPN: VPN {
         guard let manager = managers.first else {
             return
         }
-        if manager.connection.status != .disconnected {
+        if !manager.connection.status.isStopped {
             manager.connection.stopVPNTunnel()
-            try await Task.sleep(nanoseconds: after.nanoseconds)
+            try await Task.sleep(for: after.duration)
+            try await waitForDisconnection(of: manager)
         }
         try manager.connection.startVPNTunnel()
     }
 
     public func reconnect(
         _ tunnelBundleIdentifier: String,
-        configuration: NetworkExtensionConfiguration,
-        extra: NetworkExtensionExtra?,
+        configuration: sending NetworkExtensionConfiguration,
+        extra: sending NetworkExtensionExtra?,
         after: DispatchTimeInterval
     ) async throws {
         do {
@@ -87,9 +92,10 @@ public class NetworkExtensionVPN: VPN {
                 configuration: configuration,
                 extra: extra
             )
-            if manager.connection.status != .disconnected {
+            if !manager.connection.status.isStopped {
                 manager.connection.stopVPNTunnel()
-                try await Task.sleep(nanoseconds: after.nanoseconds)
+                try await Task.sleep(for: after.duration)
+                try await waitForDisconnection(of: manager)
             }
             try manager.connection.startVPNTunnel()
         } catch {
@@ -99,30 +105,89 @@ public class NetworkExtensionVPN: VPN {
     }
 
     public func disconnect() async {
-        guard let managers = try? await lookupAll() else {
+        let managers: [NETunnelProviderManager]
+        do {
+            managers = try await lookupAll()
+        } catch {
+            log.error("Unable to load VPN preferences before disconnecting: \(error)")
             return
         }
         guard !managers.isEmpty else {
             return
         }
         for m in managers {
-            m.connection.stopVPNTunnel()
+            // commit on-demand removal BEFORE stopping, or the system's
+            // on-demand engine may immediately restart the tunnel
             m.isOnDemandEnabled = false
             m.isEnabled = false
-            try? await m.saveToPreferences()
+            do {
+                try await m.saveToPreferences()
+            } catch {
+                log.error("Unable to disable on-demand before disconnecting: \(error)")
+            }
+            m.connection.stopVPNTunnel()
         }
     }
 
     public func uninstall() async {
-        guard let managers = try? await lookupAll() else {
+        let managers: [NETunnelProviderManager]
+        do {
+            managers = try await lookupAll()
+        } catch {
+            log.error("Unable to load VPN preferences before uninstalling: \(error)")
             return
         }
         guard !managers.isEmpty else {
             return
         }
         for m in managers {
+            m.isOnDemandEnabled = false
+            m.isEnabled = false
+            do {
+                try await m.saveToPreferences()
+            } catch {
+                log.error("Unable to disable VPN profile before uninstalling: \(error)")
+            }
             m.connection.stopVPNTunnel()
-            try? await m.removeFromPreferences()
+            do {
+                try await m.removeFromPreferences()
+            } catch {
+                log.error("Unable to remove VPN profile: \(error)")
+            }
+        }
+    }
+
+    /**
+     Returns the current status of the tunnel with the given bundle identifier,
+     or nil if no such tunnel is installed. Useful to seed UI state on cold
+     launch instead of waiting for the next status transition.
+
+     - Parameter tunnelBundleIdentifier: The bundle identifier of the tunnel extension.
+     */
+    public func currentStatus(ofTunnelBundleIdentifier tunnelBundleIdentifier: String) async throws -> (status: VPNStatus, connectionDate: Date?)? {
+        let managers = try await lookupAll()
+        guard let manager = managers.first(where: { $0.isTunnel(withIdentifier: tunnelBundleIdentifier) }) else {
+            return nil
+        }
+        return (manager.connection.status.wrappedStatus, manager.connection.connectedDate)
+    }
+
+    /// Waits for the system tunnel to stop before a reconnect can begin.
+    private func waitForDisconnection(
+        of manager: NETunnelProviderManager,
+        timeout: Duration = .seconds(5)
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+
+        while !manager.connection.status.isStopped {
+            try Task.checkCancellation()
+            guard clock.now < deadline else {
+                throw TunnelKitManagerError.disconnectionTimedOut(
+                    lastStatus: manager.connection.status.wrappedStatus
+                )
+            }
+            try await Task.sleep(for: .milliseconds(200))
         }
     }
 
@@ -203,7 +268,11 @@ public class NetworkExtensionVPN: VPN {
             return
         }
         for o in others {
-            try? await o.removeFromPreferences()
+            do {
+                try await o.removeFromPreferences()
+            } catch {
+                log.error("Unable to remove obsolete VPN profile: \(error)")
+            }
         }
     }
 
@@ -247,17 +316,63 @@ public class NetworkExtensionVPN: VPN {
         guard let bundleId = connection.manager.tunnelBundleIdentifier else {
             return
         }
-        log.debug("VPN status did change (\(bundleId)): isEnabled=\(connection.manager.isEnabled), status=\(connection.status.rawValue)")
+        let isEnabled = connection.manager.isEnabled
+        let status = connection.status
+        let connectionDate = connection.connectedDate
+        log.debug("VPN status did change (\(bundleId)): isEnabled=\(isEnabled), status=\(status.rawValue)")
+
+        guard status == .disconnected || status == .invalid else {
+            Self.postStatusNotification(
+                bundleIdentifier: bundleId,
+                isEnabled: isEnabled,
+                status: status.wrappedStatus,
+                connectionDate: connectionDate,
+                error: nil
+            )
+            return
+        }
+
+        // `fetchLastDisconnectError` is an async XPC round-trip. Only surface the
+        // disconnect (and its reason) if the connection is STILL down when it
+        // returns. During a stop→start reconnect (app reconnect, on-demand
+        // restart), the live status advances to `.connecting`/`.connected`
+        // synchronously while this fetch is in flight; posting a late
+        // `.disconnected` then would contradict the current state and drive
+        // consumers into a disconnect→reconnect loop. A genuine disconnect keeps
+        // the status equal to the snapshot, so its reason is still delivered.
+        connection.fetchLastDisconnectError { error in
+            guard connection.status == status else {
+                log.debug("Ignoring stale disconnect-error callback after status changed to \(connection.status.rawValue)")
+                return
+            }
+            Self.postStatusNotification(
+                bundleIdentifier: bundleId,
+                isEnabled: isEnabled,
+                status: status.wrappedStatus,
+                connectionDate: connectionDate,
+                error: error
+            )
+        }
+    }
+
+    private static func postStatusNotification(
+        bundleIdentifier: String,
+        isEnabled: Bool,
+        status: VPNStatus,
+        connectionDate: Date?,
+        error: Error?
+    ) {
         var notification = Notification(name: VPNNotification.didChangeStatus)
-        notification.vpnBundleIdentifier = bundleId
-        notification.vpnIsEnabled = connection.manager.isEnabled
-        notification.vpnStatus = connection.status.wrappedStatus
-        notification.connectionDate = connection.connectedDate
+        notification.vpnBundleIdentifier = bundleIdentifier
+        notification.vpnIsEnabled = isEnabled
+        notification.vpnStatus = status
+        notification.connectionDate = connectionDate
+        notification.vpnErrorIfPresent = error
         NotificationCenter.default.post(notification)
     }
 
     private func notifyInstallError(_ error: Error) {
-        log.error("VPN installation failed: \(error))")
+        log.error("VPN installation failed: \(error)")
 
         var notification = Notification(name: VPNNotification.didFail)
         notification.vpnError = error
@@ -281,6 +396,10 @@ private extension NEVPNManager {
 }
 
 private extension NEVPNStatus {
+    var isStopped: Bool {
+        self == .disconnected || self == .invalid
+    }
+
     var wrappedStatus: VPNStatus {
         switch self {
         case .connected:

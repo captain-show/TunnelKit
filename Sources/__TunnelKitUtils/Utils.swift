@@ -37,7 +37,7 @@
 import Foundation
 
 public extension DispatchQueue {
-    func schedule(after: DispatchTimeInterval, block: @escaping () -> Void) {
+    func schedule(after: DispatchTimeInterval, block: @escaping @Sendable () -> Void) {
         asyncAfter(deadline: .now() + after, execute: block)
     }
 }
@@ -47,11 +47,16 @@ public func fromDictionary<T: Decodable>(_ type: T.Type, _ dictionary: [String: 
     return try JSONDecoder().decode(T.self, from: data)
 }
 
+/// Thrown when a value cannot be bridged to/from a JSON dictionary.
+public struct EncodingError: Error {
+    public let message: String
+}
+
 public extension Encodable {
     func asDictionary() throws -> [String: Any] {
         let data = try JSONEncoder().encode(self)
         guard let dictionary = try JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed) as? [String: Any] else {
-            fatalError("JSONSerialization failed to encode")
+            throw EncodingError(message: "JSONSerialization did not produce a dictionary")
         }
         return dictionary
     }

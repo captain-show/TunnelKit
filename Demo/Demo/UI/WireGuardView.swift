@@ -76,7 +76,7 @@ private extension WireGuardView {
     }
 
     func connect() {
-        guard let cfg = WireGuard.DemoConfiguration.make(params: .init(
+        let parameters = WireGuard.Parameters(
             title: "TunnelKit.WireGuard",
             appGroup: appGroup,
             clientPrivateKey: clientPrivateKey,
@@ -84,15 +84,16 @@ private extension WireGuardView {
             serverPublicKey: serverPublicKey,
             serverAddress: serverAddress,
             serverPort: serverPort
-        )) else {
-            print("Configuration incomplete")
-            return
-        }
+        )
 
-        Task {
+        Task.detached {
+            guard let configuration = WireGuard.DemoConfiguration.make(params: parameters) else {
+                print("Configuration incomplete")
+                return
+            }
             try await vpn.reconnect(
                 TunnelIdentifier.wireGuard,
-                configuration: cfg,
+                configuration: configuration,
                 extra: nil,
                 after: .seconds(2)
             )

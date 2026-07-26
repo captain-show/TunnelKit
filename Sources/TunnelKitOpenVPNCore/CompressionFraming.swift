@@ -29,7 +29,7 @@ import CTunnelKitOpenVPNCore
 extension OpenVPN {
 
     /// Defines the type of compression framing.
-    public enum CompressionFraming: Int, Codable, CustomStringConvertible {
+    public enum CompressionFraming: Int, Codable, CustomStringConvertible, Sendable {
 
         /// No compression framing.
         case disabled
@@ -44,10 +44,19 @@ extension OpenVPN {
         case compressV2
 
         public var native: CompressionFramingNative {
-            guard let val = CompressionFramingNative(rawValue: rawValue) else {
-                fatalError("Unhandled CompressionFraming bridging")
+            switch self {
+            case .disabled:
+                return .disabled
+
+            case .compLZO:
+                return .compLZO
+
+            case .compress:
+                return .compress
+
+            case .compressV2:
+                return .compressV2
             }
-            return val
         }
 
         // MARK: CustomStringConvertible

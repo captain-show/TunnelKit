@@ -30,7 +30,12 @@ import CTunnelKitCore
 extension OpenVPN {
 
     /// Represents an OpenVPN static key file (as generated with --genkey)
-    public struct StaticKey: Codable, Equatable {
+    ///
+    /// `@unchecked Sendable`: the only reference-type member is `secureData`
+    /// (a `ZeroingData` holding the key bytes), which is assigned once at init
+    /// and thereafter only read. The struct is otherwise immutable value data,
+    /// so it is safe to share across concurrency domains.
+    public struct StaticKey: Codable, Equatable, @unchecked Sendable {
         enum CodingKeys: CodingKey {
             case data
 
@@ -38,7 +43,7 @@ extension OpenVPN {
         }
 
         /// The key-direction field, usually 0 on servers and 1 on clients.
-        public enum Direction: Int, Codable {
+        public enum Direction: Int, Codable, Sendable {
 
             /// Conventional server direction (implicit for tls-crypt).
             case server = 0
@@ -50,8 +55,6 @@ extension OpenVPN {
         private static let contentLength = 256 // 2048-bit
 
         private static let keyCount = 4
-
-        private static let keyLength = StaticKey.contentLength / StaticKey.keyCount
 
         private static let fileHead = "-----BEGIN OpenVPN Static key V1-----"
 
@@ -202,7 +205,6 @@ extension OpenVPN {
 
         private func key(at: Int) -> ZeroingData {
             let size = secureData.count / StaticKey.keyCount // 64 bytes each
-            assert(size == StaticKey.keyLength)
             return secureData.withOffset(at * size, count: size)
         }
 
@@ -224,7 +226,15 @@ extension OpenVPN {
 
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
-            secureData = Z(try container.decode(Data.self, forKey: .data))
+            let data = try container.decode(Data.self, forKey: .data)
+            guard data.count == StaticKey.contentLength else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .data,
+                    in: container,
+                    debugDescription: "An OpenVPN static key must contain exactly \(StaticKey.contentLength) bytes."
+                )
+            }
+            secureData = Z(data)
             direction = try container.decodeIfPresent(Direction.self, forKey: .dir)
         }
 

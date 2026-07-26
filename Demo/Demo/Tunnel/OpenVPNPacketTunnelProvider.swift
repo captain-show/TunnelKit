@@ -26,9 +26,9 @@
 import Foundation
 import TunnelKitOpenVPNAppExtension
 
-class PacketTunnelProvider: OpenVPNTunnelProvider {
-    override func startTunnel(options: [String: NSObject]? = nil) async throws {
+final class PacketTunnelProvider: OpenVPNTunnelProvider, @unchecked Sendable {
+    override init() {
+        super.init()
         dataCountInterval = 3
-        try await super.startTunnel(options: options)
     }
 }

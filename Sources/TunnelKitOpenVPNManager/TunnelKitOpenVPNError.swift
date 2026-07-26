@@ -35,10 +35,11 @@
 //
 
 import Foundation
+import TunnelKitCore
 import TunnelKitOpenVPNCore
 
 /// The errors causing a tunnel disconnection.
-public enum TunnelKitOpenVPNError: String, Error {
+public enum TunnelKitOpenVPNError: String, Error, Sendable {
 
     /// Socket endpoint could not be resolved.
     case dnsFailure
@@ -93,4 +94,79 @@ public enum TunnelKitOpenVPNError: String, Error {
 
     /// The server replied in an unexpected way.
     case unexpectedReply
+
+    /// The tunnel was set up but failed real-connectivity validation.
+    case connectionValidationFailed
+
+    /// The protocol handshake did not complete in time.
+    case handshakeTimeout
+
+    /// The remote server could not be reached.
+    case serverUnreachable
+
+    /// The operation was cancelled.
+    case cancelled
+
+    /// An internal invariant was violated (library bug).
+    case internalError
+}
+
+/// Persistable, secret-free details for the last OpenVPN connection error.
+///
+/// The legacy `TunnelKitOpenVPNError` remains available for source and storage
+/// compatibility. This snapshot additionally preserves the connection stage
+/// and safe diagnostics across the app/extension process boundary.
+public struct OpenVPNConnectionError: Codable, Equatable, Sendable {
+    public let code: ConnectionError.Code
+
+    public let stage: ConnectionStage
+
+    public let message: String
+
+    public let diagnostics: [String: String]
+
+    public let occurredAt: Date
+
+    public init(_ error: ConnectionError, occurredAt: Date = Date()) {
+        code = error.code
+        stage = error.stage
+        message = error.message
+        diagnostics = Self.sanitizedDiagnostics(error.diagnostics)
+        self.occurredAt = occurredAt
+    }
+
+    public var connectionError: ConnectionError {
+        ConnectionError(code, stage: stage, message: message, diagnostics: diagnostics)
+    }
+
+    private static func sanitizedDiagnostics(_ diagnostics: [String: String]) -> [String: String] {
+        // Persist only fields emitted by TunnelKit itself. An allowlist keeps a
+        // future caller from accidentally crossing process boundaries with a
+        // token, credential, endpoint key or other secret.
+        let allowedKeys: Set<String> = [
+            "attemptsPerProbe",
+            "deadline",
+            "failedProbes",
+            "failureDuration",
+            "gracePeriod",
+            "invalidFields",
+            "legacyCode",
+            "maxDuration",
+            "operation",
+            "parameter",
+            "phase",
+            "policy",
+            "probeIndex",
+            "reason",
+            "sawInboundTraffic",
+            "transport"
+        ]
+        return diagnostics.reduce(into: [:]) { result, entry in
+            guard allowedKeys.contains(entry.key) else {
+                return
+            }
+            // Bound app-group storage and log exposure even for safe fields.
+            result[entry.key] = String(entry.value.prefix(512))
+        }
+    }
 }

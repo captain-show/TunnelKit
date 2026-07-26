@@ -53,6 +53,21 @@ class PushTests: XCTestCase {
         XCTAssertEqual(reply.options.ipv4?.addressMask, "255.255.255.255")
         XCTAssertEqual(reply.options.ipv4?.defaultGateway, "10.5.10.5")
         XCTAssertEqual(reply.options.dnsServers, ["209.222.18.222", "209.222.18.218"])
+        XCTAssertFalse(reply.description.contains("AUkQf/b3nj3L+CH4RJPP0Vuq8/gpntr7uPqzjQhncig="))
+        XCTAssertTrue(reply.description.contains("auth-token <redacted>"))
+    }
+
+    func testAuthTokenSupportsURLSafeCharactersAndIsAlwaysRedacted() throws {
+        let token = "secret_token-with.url-safe+characters/="
+        let message = "PUSH_REPLY,auth-token \(token),topology net30,ifconfig 10.8.0.6 10.8.0.5"
+        let reply = try XCTUnwrap(OpenVPN.PushReply(message: message))
+
+        XCTAssertEqual(reply.options.authToken, token)
+        XCTAssertFalse(reply.description.contains(token))
+        XCTAssertEqual(
+            reply.description,
+            "PUSH_REPLY,auth-token <redacted>,topology net30,ifconfig 10.8.0.6 10.8.0.5"
+        )
     }
 
     func testSubnet() {

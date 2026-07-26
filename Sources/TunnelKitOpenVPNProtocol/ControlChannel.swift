@@ -128,9 +128,11 @@ extension OpenVPN {
             return toHandle
         }
 
-        func enqueueOutboundPackets(withCode code: PacketCode, key: UInt8, payload: Data, maxPacketSize: Int) {
+        func enqueueOutboundPackets(withCode code: PacketCode, key: UInt8, payload: Data, maxPacketSize: Int) throws {
             guard let sessionId = sessionId else {
-                fatalError("Missing sessionId, do reset(forNewSession: true) first")
+                // reset(forNewSession: true) must run first; a buggy caller
+                // must not crash the tunnel process
+                throw OpenVPNError.missingSessionId
             }
 
             let oldIdOut = currentPacketId.outbound
@@ -148,7 +150,13 @@ extension OpenVPN {
                 queuedCount += subPayloadLength
             } while (offset < payload.count)
 
-            assert(queuedCount == payload.count)
+            guard queuedCount == payload.count else {
+                throw ConnectionError(
+                    .internalError,
+                    stage: .protocolHandshake,
+                    message: "Control-channel packetization produced an inconsistent byte count."
+                )
+            }
 
             // packet count
             let packetCount = currentPacketId.outbound - oldIdOut

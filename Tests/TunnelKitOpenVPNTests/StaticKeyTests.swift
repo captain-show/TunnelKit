@@ -80,4 +80,10 @@ dccdb953cdf32bea03f365760b0ed800
         XCTAssertEqual(key?.hmacSendKey.toData(), send)
         XCTAssertEqual(key?.hmacReceiveKey.toData(), receive)
     }
+
+    func testDecodingRejectsInvalidKeyLength() {
+        let malformed = Data(#"{"data":"AA=="}"#.utf8)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(OpenVPN.StaticKey.self, from: malformed))
+    }
 }

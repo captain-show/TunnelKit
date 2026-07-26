@@ -29,7 +29,11 @@ import SwiftyBeaver
 
 private let log = SwiftyBeaver.self
 
-class ResolvedRemote: CustomStringConvertible {
+/// `@unchecked Sendable`: instances are created and mutated only on the tunnel
+/// queue passed to `resolve(timeout:queue:)`; the DNS completion is delivered
+/// back on that same queue, so `isResolved`/`resolvedEndpoints`/`currentEndpointIndex`
+/// are never touched concurrently.
+final class ResolvedRemote: CustomStringConvertible, @unchecked Sendable {
     let originalEndpoint: Endpoint
 
     private(set) var isResolved: Bool
@@ -57,24 +61,70 @@ class ResolvedRemote: CustomStringConvertible {
         return currentEndpointIndex < resolvedEndpoints.count
     }
 
-    func resolve(timeout: Int, queue: DispatchQueue, completionHandler: @escaping () -> Void) {
-        DNSResolver.resolve(originalEndpoint.address, timeout: timeout, queue: queue) { [weak self] in
-            self?.handleResult($0)
-            completionHandler()
+    func resolve(
+        timeout: Int,
+        queue: DispatchQueue,
+        completionHandler: @escaping @Sendable (Result<Void, ConnectionError>) -> Void
+    ) {
+        DNSResolver.resolve(
+            originalEndpoint.address,
+            timeout: timeout,
+            queue: queue,
+            family: Self.requiredFamily(for: originalEndpoint.proto)
+        ) { [weak self] result in
+            guard let self else {
+                completionHandler(.failure(ConnectionError(
+                    .cancelled,
+                    stage: .dnsResolution,
+                    message: "DNS resolution was cancelled because its remote was released."
+                )))
+                return
+            }
+            completionHandler(self.handleResult(result))
         }
     }
 
-    private func handleResult(_ result: Result<[DNSRecord], Error>) {
+    private func handleResult(_ result: Result<[DNSRecord], Error>) -> Result<Void, ConnectionError> {
         switch result {
         case .success(let records):
             log.debug("DNS resolved addresses: \(records.map { $0.address }.maskedDescription)")
             isResolved = true
             resolvedEndpoints = unrolledEndpoints(records: records)
+            currentEndpointIndex = 0
+            guard !resolvedEndpoints.isEmpty else {
+                return .failure(ConnectionError(
+                    .dnsFailure,
+                    stage: .dnsResolution,
+                    message: "DNS returned no addresses compatible with the configured transport."
+                ))
+            }
+            return .success(())
 
-        case .failure:
-            log.error("DNS resolution failed!")
+        case .failure(let error):
+            log.error("DNS resolution failed: \(error)")
             isResolved = false
             resolvedEndpoints = []
+            currentEndpointIndex = 0
+            return .failure(ConnectionError(
+                .dnsFailure,
+                stage: .dnsResolution,
+                underlying: error
+            ))
+        }
+    }
+
+    /// Maps a transport's socket type to the address family it can dial, so the
+    /// resolver does not settle early on a family this endpoint cannot use.
+    private static func requiredFamily(for proto: EndpointProtocol) -> DNSAddressFamily {
+        switch proto.socketType {
+        case .udp4, .tcp4:
+            return .ipv4
+
+        case .udp6, .tcp6:
+            return .ipv6
+
+        case .udp, .tcp:
+            return .any
         }
     }
 

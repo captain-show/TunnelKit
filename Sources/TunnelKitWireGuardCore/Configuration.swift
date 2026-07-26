@@ -24,7 +24,12 @@
 //
 
 import Foundation
-import WireGuardKit
+import TunnelKitCore
+// WireGuardKit predates Sendable annotations; its value types (TunnelConfiguration,
+// IPAddressRange, etc.) are immutable and safe to share. Import it as
+// pre-concurrency so their use does not raise spurious Sendable warnings.
+@preconcurrency import WireGuardKit
+import Network
 import NetworkExtension
 
 public protocol WireGuardConfigurationProviding {
@@ -71,6 +76,10 @@ extension WireGuard {
 
         public private(set) var peers: [PeerConfiguration]
 
+        private var dnsHTTPSURLValue: URL?
+
+        private var dnsTLSServerNameValue: String?
+
         public init() {
             self.init(PrivateKey())
         }
@@ -85,11 +94,19 @@ extension WireGuard {
         private init(_ privateKey: PrivateKey) {
             interface = InterfaceConfiguration(privateKey: privateKey)
             peers = []
+            dnsHTTPSURLValue = nil
+            dnsTLSServerNameValue = nil
         }
 
-        public init(_ tunnelConfiguration: TunnelConfiguration) {
+        public init(
+            _ tunnelConfiguration: TunnelConfiguration,
+            dnsHTTPSURL: URL? = nil,
+            dnsTLSServerName: String? = nil
+        ) {
             interface = tunnelConfiguration.interface
             peers = tunnelConfiguration.peers
+            dnsHTTPSURLValue = dnsHTTPSURL
+            dnsTLSServerNameValue = dnsTLSServerName
         }
 
         // MARK: WireGuardConfigurationProviding
@@ -135,19 +152,19 @@ extension WireGuard {
 
         public var dnsHTTPSURL: URL? {
             get {
-                interface.dnsHTTPSURL
+                dnsHTTPSURLValue
             }
             set {
-                interface.dnsHTTPSURL = newValue
+                dnsHTTPSURLValue = newValue
             }
         }
 
         public var dnsTLSServerName: String? {
             get {
-                interface.dnsTLSServerName
+                dnsTLSServerNameValue
             }
             set {
-                interface.dnsTLSServerName = newValue
+                dnsTLSServerNameValue = newValue
             }
         }
 
@@ -233,12 +250,20 @@ extension WireGuard {
 
         public func build() -> Configuration {
             let tunnelConfiguration = TunnelConfiguration(name: nil, interface: interface, peers: peers)
-            return Configuration(tunnelConfiguration: tunnelConfiguration)
+            return Configuration(
+                tunnelConfiguration: tunnelConfiguration,
+                dnsHTTPSURL: dnsHTTPSURLValue,
+                dnsTLSServerName: dnsTLSServerNameValue
+            )
         }
     }
 
     public struct Configuration: Codable, Equatable, WireGuardConfigurationProviding {
         public let tunnelConfiguration: TunnelConfiguration
+
+        public let dnsHTTPSURL: URL?
+
+        public let dnsTLSServerName: String?
 
         public var interface: InterfaceConfiguration {
             tunnelConfiguration.interface
@@ -248,12 +273,22 @@ extension WireGuard {
             tunnelConfiguration.peers
         }
 
-        public init(tunnelConfiguration: TunnelConfiguration) {
+        public init(
+            tunnelConfiguration: TunnelConfiguration,
+            dnsHTTPSURL: URL? = nil,
+            dnsTLSServerName: String? = nil
+        ) {
             self.tunnelConfiguration = tunnelConfiguration
+            self.dnsHTTPSURL = dnsHTTPSURL
+            self.dnsTLSServerName = dnsTLSServerName
         }
 
         public func builder() -> WireGuard.ConfigurationBuilder {
-            WireGuard.ConfigurationBuilder(tunnelConfiguration)
+            WireGuard.ConfigurationBuilder(
+                tunnelConfiguration,
+                dnsHTTPSURL: dnsHTTPSURL,
+                dnsTLSServerName: dnsTLSServerName
+            )
         }
 
         // MARK: WireGuardConfigurationProviding
@@ -278,14 +313,6 @@ extension WireGuard {
             interface.dnsSearch
         }
 
-        public var dnsHTTPSURL: URL? {
-            interface.dnsHTTPSURL
-        }
-
-        public var dnsTLSServerName: String? {
-            interface.dnsTLSServerName
-        }
-
         public var mtu: UInt16? {
             interface.mtu
         }
@@ -295,12 +322,26 @@ extension WireGuard {
         public init(from decoder: Decoder) throws {
             let container = try decoder.singleValueContainer()
             let wg = try container.decode(String.self)
-            let cfg = try TunnelConfiguration(fromWgQuickConfig: wg, called: nil)
-            self.init(tunnelConfiguration: cfg)
+            var dnsHTTPSURL: URL?
+            var dnsTLSServerName: String?
+            let tunnelConfiguration = try TunnelConfiguration(
+                fromTunnelKitWgQuickConfig: wg,
+                called: nil,
+                dnsHTTPSURL: &dnsHTTPSURL,
+                dnsTLSServerName: &dnsTLSServerName
+            )
+            self.init(
+                tunnelConfiguration: tunnelConfiguration,
+                dnsHTTPSURL: dnsHTTPSURL,
+                dnsTLSServerName: dnsTLSServerName
+            )
         }
 
         public func encode(to encoder: Encoder) throws {
-            let wg = tunnelConfiguration.asWgQuickConfig()
+            let wg = tunnelConfiguration.asTunnelKitWgQuickConfig(
+                dnsHTTPSURL: dnsHTTPSURL,
+                dnsTLSServerName: dnsTLSServerName
+            )
             var container = encoder.singleValueContainer()
             try container.encode(wg)
         }
@@ -334,5 +375,151 @@ extension WireGuardConfigurationProviding {
 
     public func keepAlive(ofPeer peerIndex: Int) -> UInt16? {
         peers[peerIndex].persistentKeepAlive
+    }
+}
+
+extension WireGuard.Configuration {
+
+    /// Hex keys of the peers that carry the configured validation traffic.
+    /// Route lookup uses longest-prefix matching; a healthy unrelated peer is
+    /// therefore never allowed to validate a dead default-route peer.
+    public func validationPeerPublicKeys(
+        for probes: [ConnectionValidationOptions.Probe]
+    ) -> Set<String> {
+        var selectedKeys = Set<String>()
+
+        for probe in probes {
+            switch probe {
+            case .gatewayPing:
+                let defaultPeers = peers.filter(\.routesDefaultAddressSpace)
+                let peersToUse = defaultPeers.isEmpty
+                    ? peers.filter { $0.endpoint != nil }
+                    : defaultPeers
+                selectedKeys.formUnion(peersToUse.map { $0.publicKey.hexKey.lowercased() })
+
+            case .ping(let host):
+                selectedKeys.formUnion(peerPublicKeys(routing: host))
+
+            case .dns(_, let server):
+                let target = server ?? dnsServers.first
+                if let target {
+                    selectedKeys.formUnion(peerPublicKeys(routing: target))
+                }
+            }
+        }
+
+        return selectedKeys
+    }
+
+    /// Returns a copy with an active keepalive on selected peers. This makes a
+    /// brand-new, otherwise idle profile initiate a WireGuard handshake and
+    /// provides ongoing liveness evidence without changing the saved profile.
+    public func tunnelConfigurationActivatingKeepalive(
+        for peerPublicKeys: Set<String>,
+        interval: UInt16
+    ) -> TunnelConfiguration {
+        guard interval > 0 else {
+            return tunnelConfiguration
+        }
+
+        let updatedPeers = peers.map { peer -> PeerConfiguration in
+            guard peerPublicKeys.contains(peer.publicKey.hexKey.lowercased()) else {
+                return peer
+            }
+            var updatedPeer = peer
+            if let currentInterval = updatedPeer.persistentKeepAlive {
+                if currentInterval == 0 || currentInterval > interval {
+                    updatedPeer.persistentKeepAlive = interval
+                }
+            } else {
+                updatedPeer.persistentKeepAlive = interval
+            }
+            return updatedPeer
+        }
+        return TunnelConfiguration(
+            name: tunnelConfiguration.name,
+            interface: tunnelConfiguration.interface,
+            peers: updatedPeers
+        )
+    }
+
+    private func peerPublicKeys(routing host: String) -> Set<String> {
+        let targetAddress: IPAddress?
+        if let address = IPv4Address(host) {
+            targetAddress = address
+        } else if let address = IPv6Address(host) {
+            targetAddress = address
+        } else {
+            // A hostname cannot be matched against AllowedIPs before DNS
+            // resolution. Its resolution follows the default route.
+            targetAddress = nil
+        }
+
+        guard let targetAddress else {
+            return Set(peers.filter(\.routesDefaultAddressSpace)
+                .map { $0.publicKey.hexKey.lowercased() })
+        }
+
+        var longestPrefix: UInt8?
+        var selectedKeys = Set<String>()
+        for peer in peers {
+            for route in peer.allowedIPs where route.contains(targetAddress) {
+                if let currentLongestPrefix = longestPrefix {
+                    if route.networkPrefixLength > currentLongestPrefix {
+                        longestPrefix = route.networkPrefixLength
+                        selectedKeys = [peer.publicKey.hexKey.lowercased()]
+                    } else if route.networkPrefixLength == currentLongestPrefix {
+                        selectedKeys.insert(peer.publicKey.hexKey.lowercased())
+                    }
+                } else {
+                    longestPrefix = route.networkPrefixLength
+                    selectedKeys = [peer.publicKey.hexKey.lowercased()]
+                }
+            }
+        }
+        return selectedKeys
+    }
+}
+
+private extension PeerConfiguration {
+    var routesDefaultAddressSpace: Bool {
+        if allowedIPs.contains(where: { $0.networkPrefixLength == 0 }) {
+            return true
+        }
+
+        let halves = allowedIPs.filter { $0.networkPrefixLength == 1 }
+            .map { $0.maskedAddress().rawValue }
+        let ipv4Lower = Data([0, 0, 0, 0])
+        let ipv4Upper = Data([128, 0, 0, 0])
+        if halves.contains(ipv4Lower), halves.contains(ipv4Upper) {
+            return true
+        }
+
+        let ipv6Lower = Data(repeating: 0, count: 16)
+        var ipv6Upper = ipv6Lower
+        ipv6Upper[ipv6Upper.startIndex] = 0x80
+        return halves.contains(ipv6Lower) && halves.contains(ipv6Upper)
+    }
+}
+
+private extension IPAddressRange {
+    func contains(_ candidate: IPAddress) -> Bool {
+        let routeBytes = address.rawValue
+        let candidateBytes = candidate.rawValue
+        guard routeBytes.count == candidateBytes.count else {
+            return false
+        }
+
+        let fullBytes = Int(networkPrefixLength / 8)
+        let remainingBits = Int(networkPrefixLength % 8)
+        guard routeBytes.prefix(fullBytes) == candidateBytes.prefix(fullBytes) else {
+            return false
+        }
+        guard remainingBits > 0 else {
+            return true
+        }
+
+        let mask = UInt8.max << UInt8(8 - remainingBits)
+        return routeBytes[fullBytes] & mask == candidateBytes[fullBytes] & mask
     }
 }

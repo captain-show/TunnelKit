@@ -61,14 +61,20 @@ extension OpenVPN {
         // MARK: CustomStringConvertible
 
         var description: String {
-            let stripped = NSMutableString(string: original)
-            ConfigurationParser.Regex.authToken.replaceMatches(
-                in: stripped,
-                options: [],
-                range: NSRange(location: 0, length: stripped.length),
-                withTemplate: "auth-token"
-            )
-            return stripped as String
+            PushReply.sanitizedForLogging(original)
+        }
+
+        static func sanitizedForLogging(_ message: String) -> String {
+            message
+                .components(separatedBy: ",")
+                .map { component in
+                    let trimmed = component.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard trimmed == "auth-token" || trimmed.hasPrefix("auth-token ") else {
+                        return component
+                    }
+                    return "auth-token <redacted>"
+                }
+                .joined(separator: ",")
         }
     }
 }

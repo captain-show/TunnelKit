@@ -1,12 +1,13 @@
 {
+  "originHash" : "ed3fea80cb3f0fe1233fdb1ede854f5e13b1fc9f756b0c733206b529f8cf7809",
   "pins" : [
     {
-      "identity" : "openssl",
+      "identity" : "openssl-apple",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/captain-show/OpenSSL",
+      "location" : "https://github.com/passepartoutvpn/openssl-apple",
       "state" : {
-        "branch" : "main",
-        "revision" : "203cd283fb22c2455bb56d146941145eee525ab2"
+        "revision" : "4c152e7f49de4b0ae6e4059ba1425bd969ca4a84",
+        "version" : "3.6.300"
       }
     },
     {
@@ -19,14 +20,14 @@
       }
     },
     {
-      "identity" : "wireguard-apple",
+      "identity" : "wireguard-apple-xcframework",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/captain-show/wireguard-apple",
+      "location" : "https://github.com/ridgelineinternational/wireguard-apple-xcframework",
       "state" : {
-        "branch" : "master",
-        "revision" : "5f17497d6bd732381077e0392765842c90237dd3"
+        "revision" : "0e34569b5110e3a3582652e0953fa62ecf9b2de9",
+        "version" : "0.0.7"
       }
     }
   ],
-  "version" : 2
+  "version" : 3
 }

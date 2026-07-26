@@ -36,7 +36,7 @@ private let log = SwiftyBeaver.self
 extension OpenVPN {
 
     /// Specific configuration for OpenVPN.
-    public struct ProviderConfiguration: Codable {
+    public struct ProviderConfiguration: Codable, Sendable {
         fileprivate enum Keys: String {
             case logPath = "OpenVPN.LogPath"
 
@@ -45,6 +45,8 @@ extension OpenVPN {
             case serverConfiguration = "OpenVPN.ServerConfiguration"
 
             case lastError = "OpenVPN.LastError"
+
+            case lastConnectionError = "OpenVPN.LastConnectionError"
         }
 
         /// Optional version identifier about the client pushed to server in peer-info as `IV_UI_VER`.
@@ -74,6 +76,12 @@ extension OpenVPN {
         /// Mask private data in debug log (default is `true`).
         public var masksPrivateData = true
 
+        /// Real-connectivity validation performed before reporting the tunnel
+        /// as connected. Opt-in: when nil, validation is disabled and the tunnel
+        /// is reported as connected on the OS status alone (legacy behavior).
+        /// Set `.default` or `.strict` to require end-to-end verification.
+        public var connectionValidation: ConnectionValidationOptions?
+
         public init(_ title: String, appGroup: String, configuration: OpenVPN.Configuration) {
             self.title = title
             self.appGroup = appGroup
@@ -101,7 +109,7 @@ extension OpenVPN.ProviderConfiguration: NetworkExtensionConfiguration {
         extra: NetworkExtensionExtra?
     ) throws -> NETunnelProviderProtocol {
         guard let firstRemote = configuration.remotes?.first else {
-            preconditionFailure("No remotes set")
+            throw OpenVPN.ConfigurationError.missingConfiguration(option: "remotes")
         }
 
         let protocolConfiguration = NETunnelProviderProtocol()
@@ -145,6 +153,11 @@ extension OpenVPN.ProviderConfiguration {
         return defaults?.openVPNLastError
     }
 
+    /// Detailed, secret-free context for `lastError`.
+    public var lastConnectionError: OpenVPNConnectionError? {
+        defaults?.openVPNLastConnectionError
+    }
+
     /**
      The URL of the latest debug log.
      */
@@ -163,11 +176,27 @@ extension OpenVPN.ProviderConfiguration {
     }
 
     public func _appexSetServerConfiguration(_ newValue: OpenVPN.Configuration?) {
-        defaults?.openVPNServerConfiguration = newValue
+        guard let newValue else {
+            defaults?.openVPNServerConfiguration = nil
+            return
+        }
+        // never persist session secrets to app-group UserDefaults
+        var sanitized = newValue.builder()
+        sanitized.authToken = nil
+        defaults?.openVPNServerConfiguration = sanitized.build()
     }
 
     public func _appexSetLastError(_ newValue: TunnelKitOpenVPNError?) {
         defaults?.openVPNLastError = newValue
+        defaults?.openVPNLastConnectionError = nil
+    }
+
+    public func _appexSetLastError(
+        _ newValue: TunnelKitOpenVPNError,
+        connectionError: ConnectionError
+    ) {
+        defaults?.openVPNLastError = newValue
+        defaults?.openVPNLastConnectionError = OpenVPNConnectionError(connectionError)
     }
 
     public var _appexDebugLogURL: URL? {
@@ -240,6 +269,7 @@ extension UserDefaults {
         }
         set {
             guard let newValue = newValue else {
+                removeObject(forKey: OpenVPN.ProviderConfiguration.Keys.serverConfiguration.rawValue)
                 return
             }
             let encoder = JSONEncoder()
@@ -265,6 +295,32 @@ extension UserDefaults {
                 return
             }
             set(newValue.rawValue, forKey: OpenVPN.ProviderConfiguration.Keys.lastError.rawValue)
+        }
+    }
+
+    public fileprivate(set) var openVPNLastConnectionError: OpenVPNConnectionError? {
+        get {
+            guard let data = data(forKey: OpenVPN.ProviderConfiguration.Keys.lastConnectionError.rawValue) else {
+                return nil
+            }
+            do {
+                return try JSONDecoder().decode(OpenVPNConnectionError.self, from: data)
+            } catch {
+                log.error("Unable to decode the last OpenVPN connection error: \(error)")
+                return nil
+            }
+        }
+        set {
+            guard let newValue else {
+                removeObject(forKey: OpenVPN.ProviderConfiguration.Keys.lastConnectionError.rawValue)
+                return
+            }
+            do {
+                set(try JSONEncoder().encode(newValue), forKey: OpenVPN.ProviderConfiguration.Keys.lastConnectionError.rawValue)
+            } catch {
+                log.error("Unable to encode the last OpenVPN connection error: \(error)")
+                removeObject(forKey: OpenVPN.ProviderConfiguration.Keys.lastConnectionError.rawValue)
+            }
         }
     }
 }

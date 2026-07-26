@@ -115,8 +115,15 @@ extension OpenVPN {
         convenience init(_ cipher: Cipher, _ digest: Digest, _ auth: Authenticator,
                          _ sessionId: Data, _ remoteSessionId: Data) throws {
 
+            // server randoms come from parsed network input; a malformed server
+            // must not be able to trap the tunnel process here (the caller
+            // already guards, but this init is throwing, so fail cleanly)
             guard let serverRandom1 = auth.serverRandom1, let serverRandom2 = auth.serverRandom2 else {
-                fatalError("Configuring encryption without server randoms")
+                throw ConnectionError(
+                    .internalError,
+                    stage: .protocolHandshake,
+                    message: "Configuring encryption without server randoms"
+                )
             }
 
             let masterData = try EncryptionBridge.keysPRF(

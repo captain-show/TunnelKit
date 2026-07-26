@@ -26,9 +26,9 @@
 import Foundation
 import TunnelKitWireGuardAppExtension
 
-class PacketTunnelProvider: WireGuardTunnelProvider {
-    override func startTunnel(options: [String: NSObject]? = nil) async throws {
+final class PacketTunnelProvider: WireGuardTunnelProvider, @unchecked Sendable {
+    override init() {
+        super.init()
         dataCountInterval = 3
-        try await super.startTunnel(options: options)
     }
 }

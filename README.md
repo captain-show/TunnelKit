@@ -1,6 +1,5 @@
-![iOS 15+](https://img.shields.io/badge/ios-15+-green.svg)
-![macOS 12+](https://img.shields.io/badge/macos-12+-green.svg)
-![tvOS 17+](https://img.shields.io/badge/tvos-17+-green.svg)
+![iOS 17.6+](https://img.shields.io/badge/iOS-17.6+-green.svg)
+![macOS 14+](https://img.shields.io/badge/macOS-14+-green.svg)
 [![License GPLv3](https://img.shields.io/badge/license-GPLv3-lightgray.svg)](LICENSE)
 
 [![Unit Tests](https://github.com/passepartoutvpn/tunnelkit/actions/workflows/test.yml/badge.svg)](https://github.com/passepartoutvpn/tunnelkit/actions/workflows/test.yml)
@@ -12,7 +11,7 @@ This library provides a generic framework for VPN development on Apple platforms
 
 ## OpenVPN
 
-TunnelKit comes with a simplified Swift/Obj-C implementation of the [OpenVPN®][dep-openvpn] protocol, whose crypto layer is built on top of [OpenSSL 3.2.0][dep-openssl].
+TunnelKit comes with a simplified Swift/Obj-C implementation of the [OpenVPN®][dep-openvpn] protocol. Its crypto layer uses [OpenSSL 3.6.2][dep-openssl], distributed by the pinned [`openssl-apple` 3.6.300 package][dep-openssl-package].
 
 The client is known to work with OpenVPN® 2.3+ servers.
 
@@ -86,55 +85,101 @@ Many other flags are ignored too but it's normally not an issue.
 
 TunnelKit offers a user-friendly API to the modern [WireGuard®][dep-wireguard] protocol.
 
-### Manual Xcode steps
+TunnelKit pins [`wireguard-apple-xcframework` 0.0.7][dep-wireguard-xcframework],
+which distributes WireGuardKit as a prebuilt XCFramework for iOS devices, the
+iOS Simulator and macOS. SwiftPM resolves and links it automatically; consumer
+projects no longer need Go, `make`, an external build target or a custom build
+script.
 
-If you add any `TunnelKitWireGuard*` Swift package to the "Link with binary libraries" section of your app or tunnel extension, you are bound to hit this error:
+## Connection validation
 
+Validation is fail-closed unless a profile explicitly selects `.disabled`.
+OpenVPN is only reported as connected after the current connection attempt has
+completed all of these steps:
+
+1. the TLS handshake and `PUSH_REPLY` negotiation must complete;
+2. the tunnel network settings must apply successfully;
+3. a configured external ICMP or DNS probe must receive a valid response through the tunnel; the default is a DNS query for `example.com` through tunnel DNS;
+4. the successful probe must remain valid through the stabilization period.
+
+After connecting, OpenVPN repeats the same end-to-end validation every 15
+seconds. A failed check immediately switches NetworkExtension to reasserting;
+failures that persist through the 15-second grace period trigger a reconnect.
+Extension subclasses may tune `connectivityWatchdogInterval` and
+`connectivityFailureGracePeriod`; setting the interval to 0 is an explicit
+runtime-monitoring opt-out.
+
+On supported systems, WireGuard with validation enabled actively triggers and
+verifies a fresh handshake from the selected routed peers required by the
+validation policy,
+then requires an end-to-end probe and continuously monitors both handshake
+freshness and probe results after connecting. On iOS 18+ and macOS 15+, DNS
+and ICMP probes are bound to the tunnel's `virtualInterface`, so the default
+verifies external DNS access. On iOS 17.6 and macOS 14, NetworkExtension does
+not expose `virtualInterface`; enabled validation, including `.default`, fails
+with `ConnectionError.Code.unsupportedConfiguration` instead of returning
+`connected` from handshake evidence alone. `.disabled` is the only legacy
+opt-out.
+
+For both protocols, a gateway reply and unrelated inbound traffic are only
+diagnostics. Neither can count as end-to-end success. If a mandatory step
+fails, the attempt ends in a typed `ConnectionError`, with a compatible
+`TunnelKitOpenVPNError` or `TunnelKitWireGuardError` summary. Detailed,
+secret-free `OpenVPNConnectionError` and `WireGuardConnectionError` snapshots
+are available from `ProviderConfiguration.lastConnectionError` across the
+app-extension boundary.
+
+Validation is configured per profile via `ProviderConfiguration.connectionValidation`:
+
+```swift
+var cfg = OpenVPN.ProviderConfiguration(...)
+cfg.connectionValidation = .default   // DNS answer for example.com through tunnel DNS
+cfg.connectionValidation = .strict    // all probes, including diagnostics, must pass
+cfg.connectionValidation = .disabled  // explicit legacy opt-out
+
+// or fine-tune:
+var validation = ConnectionValidationOptions()
+validation.probes = [
+    .gatewayPing,
+    .dns(hostname: "probe.your-domain.com", server: nil)
+]
+validation.policy = .any
+validation.probeTimeout = 4
+validation.probeAttempts = 3
+validation.stabilizationPeriod = 2
+cfg.connectionValidation = validation
 ```
-ld: library not found for -lwg-go
-```
 
-because part of the WireGuardKit package is based on `make`, which SwiftPM doesn't support yet.
+`example.com` is a reserved, stable default endpoint and can be replaced with
+one you control. A custom ping target must be a numeric external address; the
+tunnel address and gateway are rejected. An enabled configuration with no
+usable end-to-end probe always fails closed.
 
-Therefore, make sure to follow the steps below for proper integration:
+For DoH/DoT profiles, an implicit `.dns(..., server: nil)` probe would send
+plaintext UDP/53 and therefore cannot validate the configured encrypted DNS
+transport. Configure a numeric `.ping` target or an explicit plaintext DNS
+probe server and remove every implicit DNS probe; otherwise the profile fails
+with `unsupportedConfiguration` instead of producing a misleading result.
 
-- Copy `Scripts/build_wireguard_go_bridge.sh` somewhere in your project.
-- In Xcode, click File -> New -> Target. Switch to "Other" tab and choose "External Build System".
-- Type a name for your target.
-- Open the "Info" tab and replace `/usr/bin/make` with `$(PROJECT_DIR)/path/to/build_wireguard_go_bridge.sh` in "Build Tool".
-- Switch to "Build Settings" and find SDKROOT. Type in `macosx` if you target macOS, or type in `iphoneos` if you target iOS.
-- Locate your tunnel extension target and switch to "Build Phases" tab.
-- Locate "Dependencies" section and hit "+" to add the target you have just created.
-- Repeat the process for each platform.
+The internal lifecycle follows an explicit state machine:
+`idle → preparing → connecting → negotiating → validating → connected → disconnecting → disconnected/failed`.
 
 ## Installation
 
 ### Requirements
 
-- iOS 15+ / macOS 12+ / tvOS 17+
-- SwiftPM 5.3
+- iOS 17.6+ / macOS 14+
+- Xcode 16+ and Swift 6
 - Git (preinstalled with Xcode Command Line Tools)
-- golang (for WireGuardKit)
 
-It's highly recommended to use the Git package provided by [Homebrew][dep-brew].
+### Migration from deprecated NetworkExtension transports
 
-### Caveats
-
-Make sure to set "Enable Bitcode" (iOS) to NO, otherwise the library [would not be able to link OpenSSL][about-pr-bitcode] (OpenVPN) and the `wg-go` bridge (WireGuard).
-
-Recent versions of Xcode (latest is 13.1) have an issue where the "Frameworks" directory is replicated inside application extensions. This is not a blocker during development, but will prevent your archive from being validated against App Store Connect due to the following error:
-
-    ERROR ITMS-90206: "Invalid Bundle. The bundle at '*.appex' contains disallowed file 'Frameworks'."
-
-You will need to add a "Run Script" phase to your main app target where you manually remove the offending folder, i.e.:
-
-    rm -rf "${BUILT_PRODUCTS_DIR}/${PLUGINS_FOLDER_PATH}/YourTunnelTarget.appex/Frameworks"
-
-for iOS and:
-
-    rm -rf "${BUILT_PRODUCTS_DIR}/${PLUGINS_FOLDER_PATH}/YourTunnelTarget.appex/Contents/Frameworks"
-
-for macOS.
+The public `NETCPSocket` and `NEUDPSocket` types, which depended on Apple's
+deprecated `NWTCPConnection` and `NWUDPSession` APIs, have been removed. Code
+that constructed either concrete socket must migrate to `NWConnectionSocket`
+and configure an `NWEndpoint` plus `NWParameters`. OpenVPN's internal
+`NETCPLink` and `NEUDPLink` implementations were replaced by
+`NWConnection`-backed links as part of the same migration.
 
 ### Demo
 
@@ -142,7 +187,7 @@ Download the library codebase locally:
 
     $ git clone https://github.com/passepartoutvpn/tunnelkit.git
 
-There are demo targets containing a simple app for testing the tunnels. Open `Demo/TunnelKit.xcodeproject` in Xcode and run it.
+There are demo targets containing a simple app for testing the tunnels. Open `Demo/TunnelKit.xcodeproj` in Xcode and run it.
 
 For the VPN to work properly, the demo requires:
 
@@ -151,7 +196,7 @@ For the VPN to work properly, the demo requires:
 
 both in the main app and the tunnel extension targets.
 
-In order to test connectivity in your own environment, modify the file `Demo/Demo/Configuration.swift` to match your VPN server parameters.
+In order to test connectivity in your own environment, modify the file `Demo/Demo/UI/Configuration.swift` to match your VPN server parameters.
 
 Example:
 
@@ -161,7 +206,8 @@ Example:
 	-----END CERTIFICATE-----
     """)
 
-Make sure to also update the following constants in the `*ViewController.swift` files, according to your developer account and your target bundle identifiers:
+Make sure to also update the identifiers in `Demo/Demo/UI/Configuration.swift`
+according to your developer account and target bundle identifiers:
 
     private let appGroup = "..."
     private let tunnelIdentifier = "..."
@@ -172,7 +218,7 @@ Remember that the App Group on macOS requires a team ID prefix.
 
 The library is split into several modules, in order to decouple the low-level protocol implementation from the platform-specific bridging, namely the [NetworkExtension][ne-home] VPN framework.
 
-Full documentation of the public interface is available and can be generated by opening the package in Xcode and running "Build Documentation" (Xcode 13).
+Full documentation of the public interface can be generated by opening the package in Xcode and running "Build Documentation".
 
 ### TunnelKit
 
@@ -180,6 +226,14 @@ This component includes convenient classes to control the VPN tunnel from your a
 
 - `MockVPN` (default, useful to test on simulator)
 - `NetworkExtensionVPN` (anything based on NetworkExtension)
+
+`NetworkExtensionVPN.currentStatus(ofTunnelBundleIdentifier:)` now throws
+preference-loading errors instead of treating them as "not installed".
+Reconnect waits until the previous tunnel is actually stopped and throws
+`TunnelKitManagerError.disconnectionTimedOut` after five seconds rather than
+starting a second connection over a still-disconnecting one. Disconnected
+status notifications include NetworkExtension's last disconnect error in
+`vpnErrorIfPresent` when the system provides one.
 
 ### TunnelKitOpenVPN
 
@@ -233,7 +287,7 @@ A custom TunnelKit license, e.g. for use in proprietary software, may be negotia
 - [SwiftyBeaver][dep-swiftybeaver-repo] - Copyright (c) 2015 Sebastian Kreutzberger
 - [XMB5][ppl-xmb5] for the [XOR patch][ppl-xmb5-xor] - Copyright (c) 2020 Sam Foxman
 - [tmthecoder][ppl-tmthecoder] for the complete [XOR patch][ppl-tmthecoder-xor] - Copyright (c) 2022 Tejas Mehta
-- [eduVPN][ppl-eduvpn] for the convenient WireGuardKitGo script
+- [Ridgeline International][dep-wireguard-xcframework] for the prebuilt WireGuardKit XCFramework
 
 ### OpenVPN
 
@@ -253,34 +307,29 @@ Twitter: [@keeshux][about-twitter]
 
 Website: [passepartoutvpn.app][about-website]
 
-[dep-brew]: https://brew.sh/
 [dep-openvpn]: https://openvpn.net/index.php/open-source/overview.html
 [dep-wireguard]: https://www.wireguard.com/
+[dep-wireguard-xcframework]: https://github.com/ridgelineinternational/wireguard-apple-xcframework/tree/0.0.7
 [dep-openssl]: https://www.openssl.org/
+[dep-openssl-package]: https://github.com/passepartoutvpn/openssl-apple/tree/3.6.300
 
 [ne-home]: https://developer.apple.com/documentation/networkextension
-[ne-ptp]: https://developer.apple.com/documentation/networkextension/nepackettunnelprovider
-[ne-udp]: https://developer.apple.com/documentation/networkextension/nwudpsession
-[ne-tcp]: https://developer.apple.com/documentation/networkextension/nwtcpconnection
 
 [license-content]: LICENSE
 [license-signal]: https://github.com/signalapp/libsignal-protocol-c#license
-[license-mit]: https://choosealicense.com/licenses/mit/
 [license-contact]: mailto:license@passepartoutvpn.app
 [contrib-cla]: CLA.rst
 [contrib-readme]: CONTRIBUTING.md
 
 [dep-piatunnel-repo]: https://github.com/pia-foss/tunnel-apple
 [dep-swiftybeaver-repo]: https://github.com/SwiftyBeaver/SwiftyBeaver
-[dep-lzo-website]: http://www.oberhumer.com/opensource/lzo/
+[dep-lzo-website]: https://www.oberhumer.com/opensource/lzo/
 [ppl-surfnet]: https://www.surf.nl/en/about-surf/subsidiaries/surfnet
 [ppl-xmb5]: https://github.com/XMB5
 [ppl-xmb5-xor]: https://github.com/passepartoutvpn/tunnelkit/pull/170
 [ppl-tmthecoder]: https://github.com/tmthecoder
 [ppl-tmthecoder-xor]: https://github.com/passepartoutvpn/tunnelkit/pull/255
-[ppl-eduvpn]: https://github.com/eduvpn/apple
 [about-tunnelblick-xor]: https://tunnelblick.net/cOpenvpn_xorpatch.html
-[about-pr-bitcode]: https://github.com/passepartoutvpn/tunnelkit/issues/51
 
 [about-twitter]: https://twitter.com/keeshux
 [about-website]: https://passepartoutvpn.app

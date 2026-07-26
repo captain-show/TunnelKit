@@ -26,6 +26,25 @@
 import Foundation
 
 /// Errors returned by Core library.
-public enum TunnelKitManagerError: Error {
+public enum TunnelKitManagerError: Error, Sendable {
     case keychain(_ error: KeychainError)
+
+    /// A notification was queried for a payload key it does not carry.
+    case missingNotificationPayload(key: String)
+
+    /// The system did not finish disconnecting before a reconnect attempt timed out.
+    case disconnectionTimedOut(lastStatus: VPNStatus)
+}
+
+extension TunnelKitManagerError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .keychain(let error):
+            return "Keychain operation failed: \(error)"
+        case .missingNotificationPayload(let key):
+            return "VPN notification is missing the '\(key)' payload."
+        case .disconnectionTimedOut(let lastStatus):
+            return "VPN did not disconnect before the reconnect timeout (last status: \(lastStatus.rawValue))."
+        }
+    }
 }

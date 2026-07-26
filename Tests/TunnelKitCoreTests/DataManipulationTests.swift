@@ -73,6 +73,23 @@ class DataManipulationTests: XCTestCase {
         XCTAssertEqual(z3.toData(), Data(hex: "5678abaaddcc"))
     }
 
+    func testZeroingDataPreservesUnicodeString() {
+        let value = "пароль🔐"
+        let secureData = Z(value, nullTerminated: true)
+
+        XCTAssertEqual(secureData.toData(), Data(value.utf8) + Data([0]))
+        XCTAssertEqual(secureData.nullTerminatedString(fromOffset: 0), value)
+    }
+
+    func testDataPreservesUnicodeNullTerminatedString() {
+        let value = "пользователь"
+        var data = Data()
+
+        data.append(nullTerminatedString: value)
+
+        XCTAssertEqual(data.nullTerminatedString(from: 0), value)
+    }
+
     func testFlatCount() {
         var v: [Data] = []
         v.append(Data(hex: "11223344"))

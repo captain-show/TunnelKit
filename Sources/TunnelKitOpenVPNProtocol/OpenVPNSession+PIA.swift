@@ -61,7 +61,7 @@ extension OpenVPNSession {
         // Ruby: pia_settings
         func encodedData() throws -> Data {
             guard let plainData = String(format: PIAHardReset.encodedFormat, cipherName, digestName, caMd5Digest).data(using: .ascii) else {
-                fatalError("Unable to encode string to ASCII")
+                throw OpenVPNError.malformedPushReply
             }
             let keyBytes = try SecureRandom.data(length: PIAHardReset.obfuscationKeyLength)
 

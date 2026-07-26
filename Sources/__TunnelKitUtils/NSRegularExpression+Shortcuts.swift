@@ -32,12 +32,15 @@ extension NSRegularExpression {
 
     public func groups(in string: String) -> [String] {
         var results: [String] = []
-        enumerateMatches(in: string, options: [], range: NSRange(location: 0, length: string.count)) { result, _, _ in
+        enumerateMatches(in: string, options: [], range: NSRange(string.startIndex..., in: string)) { result, _, _ in
             guard let result = result else {
                 return
             }
             for i in 0..<numberOfCaptureGroups {
                 let subrange = result.range(at: i + 1)
+                guard subrange.location != NSNotFound else {
+                    continue
+                }
                 let match = (string as NSString).substring(with: subrange)
                 results.append(match)
             }
@@ -48,7 +51,7 @@ extension NSRegularExpression {
 
 extension NSRegularExpression {
     public func enumerateSpacedComponents(in string: String, using block: ([String]) -> Void) {
-        enumerateMatches(in: string, options: [], range: NSRange(location: 0, length: string.count)) { result, _, _ in
+        enumerateMatches(in: string, options: [], range: NSRange(string.startIndex..., in: string)) { result, _, _ in
             guard let range = result?.range else {
                 return
             }

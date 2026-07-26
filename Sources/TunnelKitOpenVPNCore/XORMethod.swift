@@ -29,7 +29,7 @@ import CTunnelKitOpenVPNCore
 extension OpenVPN {
 
     /// The obfuscation method.
-    public enum XORMethod: Codable, Equatable {
+    public enum XORMethod: Codable, Equatable, Sendable {
 
         /// XORs the bytes in each buffer with the given mask.
         case xormask(mask: Data)

@@ -37,7 +37,12 @@ extension TunnelConfiguration {
         case multipleEntriesForKey(String)
     }
 
-    convenience init(fromWgQuickConfig wgQuickConfig: String, called name: String? = nil) throws {
+    convenience init(
+        fromTunnelKitWgQuickConfig wgQuickConfig: String,
+        called name: String? = nil,
+        dnsHTTPSURL: inout URL?,
+        dnsTLSServerName: inout String?
+    ) throws {
         var interfaceConfiguration: InterfaceConfiguration?
         var peerConfigurations = [PeerConfiguration]()
 
@@ -94,9 +99,11 @@ extension TunnelConfiguration {
             if isLastLine || lowercasedLine == "[interface]" || lowercasedLine == "[peer]" {
                 // Previous section has ended; process the attributes collected so far
                 if parserState == .inInterfaceSection {
-                    let interface = try TunnelConfiguration.collate(interfaceAttributes: attributes)
+                    let result = try TunnelConfiguration.collate(interfaceAttributes: attributes)
                     guard interfaceConfiguration == nil else { throw ParseError.multipleInterfaces }
-                    interfaceConfiguration = interface
+                    interfaceConfiguration = result.interface
+                    dnsHTTPSURL = result.dnsHTTPSURL
+                    dnsTLSServerName = result.dnsTLSServerName
                 } else if parserState == .inPeerSection {
                     let peer = try TunnelConfiguration.collate(peerAttributes: attributes)
                     peerConfigurations.append(peer)
@@ -125,7 +132,7 @@ extension TunnelConfiguration {
         }
     }
 
-    func asWgQuickConfig() -> String {
+    func asTunnelKitWgQuickConfig(dnsHTTPSURL: URL?, dnsTLSServerName: String?) -> String {
         var output = "[Interface]\n"
         output.append("PrivateKey = \(interface.privateKey.base64Key)\n")
         if let listenPort = interface.listenPort {
@@ -141,10 +148,10 @@ extension TunnelConfiguration {
             let dnsString = dnsLine.joined(separator: ", ")
             output.append("DNS = \(dnsString)\n")
         }
-        if let dnsHTTPSURL = interface.dnsHTTPSURL {
+        if let dnsHTTPSURL {
             output.append("DNSOverHTTPSURL = \(dnsHTTPSURL)\n")
         }
-        if let dnsTLSServerName = interface.dnsTLSServerName {
+        if let dnsTLSServerName {
             output.append("DNSOverTLSServerName = \(dnsTLSServerName)\n")
         }
         if let mtu = interface.mtu {
@@ -172,7 +179,11 @@ extension TunnelConfiguration {
         return output
     }
 
-    private static func collate(interfaceAttributes attributes: [String: String]) throws -> InterfaceConfiguration {
+    private static func collate(interfaceAttributes attributes: [String: String]) throws -> (
+        interface: InterfaceConfiguration,
+        dnsHTTPSURL: URL?,
+        dnsTLSServerName: String?
+    ) {
         guard let privateKeyString = attributes["privatekey"] else {
             throw ParseError.interfaceHasNoPrivateKey
         }
@@ -209,19 +220,15 @@ extension TunnelConfiguration {
             interface.dns = dnsServers
             interface.dnsSearch = dnsSearch
         }
-        if let dnsHTTPSURL = attributes["dnsoverhttpsurl"] {
-            interface.dnsHTTPSURL = URL(string: dnsHTTPSURL)
-        }
-        if let dnsTLSServerName = attributes["dnsovertlsservername"] {
-            interface.dnsTLSServerName = dnsTLSServerName
-        }
+        let dnsHTTPSURL = attributes["dnsoverhttpsurl"].flatMap(URL.init(string:))
+        let dnsTLSServerName = attributes["dnsovertlsservername"]
         if let mtuString = attributes["mtu"] {
             guard let mtu = UInt16(mtuString) else {
                 throw ParseError.interfaceHasInvalidMTU(mtuString)
             }
             interface.mtu = mtu
         }
-        return interface
+        return (interface, dnsHTTPSURL, dnsTLSServerName)
     }
 
     private static func collate(peerAttributes attributes: [String: String]) throws -> PeerConfiguration {

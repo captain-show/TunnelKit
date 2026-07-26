@@ -26,10 +26,10 @@
 import Foundation
 
 /// Encapsulates the IPv6 settings for the tunnel.
-public struct IPv6Settings: Codable, Equatable, CustomStringConvertible {
+public struct IPv6Settings: Codable, Equatable, CustomStringConvertible, Sendable {
 
     /// Represents an IPv6 route in the routing table.
-    public struct Route: Codable, Hashable, CustomStringConvertible {
+    public struct Route: Codable, Hashable, CustomStringConvertible, Sendable {
 
         /// The destination host or subnet.
         public let destination: String

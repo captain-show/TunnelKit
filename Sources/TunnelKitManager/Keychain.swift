@@ -42,7 +42,7 @@ import Foundation
 // Account -> Account
 
 /// Error raised by `Keychain` methods.
-public enum KeychainError: Error {
+public enum KeychainError: Error, Sendable {
 
     /// Unable to add.
     case add
@@ -53,8 +53,8 @@ public enum KeychainError: Error {
     /// Operation cancelled or unauthorized.
     case userCancelled
 
-//    /// Unexpected item type returned.
-//    case typeMismatch
+    /// Unexpected item type returned by the keychain.
+    case typeMismatch
 }
 
 /// Wrapper for easy keychain access and modification.
@@ -305,10 +305,11 @@ public class Keychain {
         default:
             throw TunnelKitManagerError.keychain(.notFound)
         }
-//        guard let key = result as? SecKey else {
-//            throw TunnelKitManagerError.keychain(.typeMismatch)
-//        }
-//        return key
+        // avoid a force-cast trap on a pathological keychain state (success
+        // with an unexpected result type)
+        guard let result, CFGetTypeID(result) == SecKeyGetTypeID() else {
+            throw TunnelKitManagerError.keychain(.typeMismatch)
+        }
         return result as! SecKey
     }
 

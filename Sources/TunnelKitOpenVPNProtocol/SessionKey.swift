@@ -65,13 +65,6 @@ extension OpenVPN {
 
         var tlsOptional: TLSBox?
 
-        var tls: TLSBox {
-            guard let tls = tlsOptional else {
-                fatalError("TLSBox accessed when nil")
-            }
-            return tls
-        }
-
         var dataPath: DataPath?
 
         private var isTLSConnected: Bool
@@ -100,7 +93,10 @@ extension OpenVPN {
             guard !isTLSConnected else {
                 return false
             }
-            if tls.isConnected() {
+            guard let tlsOptional else {
+                return false
+            }
+            if tlsOptional.isConnected() {
                 isTLSConnected = true
             }
             return isTLSConnected

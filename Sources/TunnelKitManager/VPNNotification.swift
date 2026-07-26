@@ -40,13 +40,10 @@ public struct VPNNotification {
 
 extension Notification {
 
-    /// The VPN bundle identifier.
+    /// The VPN bundle identifier, if the notification carries one.
     public var vpnBundleIdentifier: String? {
         get {
-            guard let vpnBundleIdentifier = userInfo?["BundleIdentifier"] as? String else {
-                fatalError("Notification has no vpnBundleIdentifier")
-            }
-            return vpnBundleIdentifier
+            userInfo?["BundleIdentifier"] as? String
         }
         set {
             var newInfo = userInfo ?? [:]
@@ -55,63 +52,81 @@ extension Notification {
         }
     }
 
-    /// The current VPN enabled state.
-    public var vpnIsEnabled: Bool {
+    /// The current VPN enabled state, if the notification carries one.
+    public var vpnIsEnabledIfPresent: Bool? {
         get {
-            guard let vpnIsEnabled = userInfo?["IsEnabled"] as? Bool else {
-                fatalError("Notification has no vpnIsEnabled")
-            }
-            return vpnIsEnabled
+            userInfo?["IsEnabled"] as? Bool
         }
         set {
-            var newInfo = userInfo ?? [:]
-            newInfo["IsEnabled"] = newValue
-            userInfo = newInfo
+            setVPNPayload(newValue, forKey: "IsEnabled")
         }
     }
 
-    /// The current VPN status.
-    public var vpnStatus: VPNStatus {
+    /// The current VPN enabled state (false when the notification carries none).
+    public var vpnIsEnabled: Bool {
         get {
-            guard let vpnStatus = userInfo?["Status"] as? VPNStatus else {
-                fatalError("Notification has no vpnStatus")
-            }
-            return vpnStatus
+            vpnIsEnabledIfPresent ?? false
         }
         set {
-            var newInfo = userInfo ?? [:]
-            newInfo["Status"] = newValue
-            userInfo = newInfo
+            vpnIsEnabledIfPresent = newValue
+        }
+    }
+
+    /// The current VPN status, if the notification carries one.
+    public var vpnStatusIfPresent: VPNStatus? {
+        get {
+            userInfo?["Status"] as? VPNStatus
+        }
+        set {
+            setVPNPayload(newValue, forKey: "Status")
+        }
+    }
+
+    /// The current VPN status (`.disconnected` when the notification carries none).
+    public var vpnStatus: VPNStatus {
+        get {
+            vpnStatusIfPresent ?? .disconnected
+        }
+        set {
+            vpnStatusIfPresent = newValue
+        }
+    }
+
+    /// The triggered VPN error, if the notification carries one.
+    public var vpnErrorIfPresent: Error? {
+        get {
+            userInfo?["Error"] as? Error
+        }
+        set {
+            setVPNPayload(newValue, forKey: "Error")
         }
     }
 
     /// The triggered VPN error.
     public var vpnError: Error {
         get {
-            guard let vpnError = userInfo?["Error"] as? Error else {
-                fatalError("Notification has no vpnError")
-            }
-            return vpnError
+            vpnErrorIfPresent ?? TunnelKitManagerError.missingNotificationPayload(key: "Error")
         }
         set {
-            var newInfo = userInfo ?? [:]
-            newInfo["Error"] = newValue
-            userInfo = newInfo
+            vpnErrorIfPresent = newValue
         }
     }
 
-    /// The current VPN connection date.
+    /// The current VPN connection date, if the notification carries one.
     public var connectionDate: Date? {
         get {
-            guard let date = userInfo?["ConnectionDate"] as? Date else {
-                fatalError("Notification has no connectionDate")
-            }
-            return date
+            userInfo?["ConnectionDate"] as? Date
         }
         set {
             var newInfo = userInfo ?? [:]
             newInfo["ConnectionDate"] = newValue
             userInfo = newInfo
         }
+    }
+
+    private mutating func setVPNPayload(_ value: Any?, forKey key: String) {
+        var newInfo = userInfo ?? [:]
+        newInfo[key] = value
+        userInfo = newInfo
     }
 }

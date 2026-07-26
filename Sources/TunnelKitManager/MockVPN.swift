@@ -57,8 +57,8 @@ public class MockVPN: VPN {
 
     public func install(
         _ tunnelBundleIdentifier: String,
-        configuration: NetworkExtensionConfiguration,
-        extra: NetworkExtensionExtra?
+        configuration: sending NetworkExtensionConfiguration,
+        extra: sending NetworkExtensionExtra?
     ) {
         self.tunnelBundleIdentifier = tunnelBundleIdentifier
         isEnabled = true
@@ -77,8 +77,8 @@ public class MockVPN: VPN {
 
     public func reconnect(
         _ tunnelBundleIdentifier: String,
-        configuration: NetworkExtensionConfiguration,
-        extra: NetworkExtensionExtra?,
+        configuration: sending NetworkExtensionConfiguration,
+        extra: sending NetworkExtensionExtra?,
         after: DispatchTimeInterval
     ) async throws {
         self.tunnelBundleIdentifier = tunnelBundleIdentifier

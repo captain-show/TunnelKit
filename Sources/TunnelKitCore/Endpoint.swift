@@ -27,7 +27,7 @@ import Foundation
 import __TunnelKitUtils
 
 /// Represents an endpoint.
-public struct Endpoint: RawRepresentable, Codable, Equatable, CustomStringConvertible {
+public struct Endpoint: RawRepresentable, Codable, Equatable, CustomStringConvertible, Sendable {
 
     // XXX: simplistic match
     private static let rx = NSRegularExpression("^([^\\s]+):(UDP[46]?|TCP[46]?):(\\d+)$")
@@ -50,7 +50,8 @@ public struct Endpoint: RawRepresentable, Codable, Equatable, CustomStringConver
     }
 
     public var isIPv6: Bool {
-        var addr = in_addr()
+        // in6_addr is 16 bytes; writing into in_addr (4 bytes) would smash the stack
+        var addr = in6_addr()
         let result = address.withCString {
             inet_pton(AF_INET6, $0, &addr)
         }
@@ -99,7 +100,7 @@ public struct Endpoint: RawRepresentable, Codable, Equatable, CustomStringConver
 }
 
 /// Defines the communication protocol of an endpoint.
-public struct EndpointProtocol: RawRepresentable, Equatable, CustomStringConvertible {
+public struct EndpointProtocol: RawRepresentable, Equatable, CustomStringConvertible, Sendable {
 
     /// The socket type.
     public let socketType: SocketType

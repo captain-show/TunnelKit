@@ -26,10 +26,10 @@
 import Foundation
 
 /// Encapsulates the IPv4 settings for the tunnel.
-public struct IPv4Settings: Codable, Equatable, CustomStringConvertible {
+public struct IPv4Settings: Codable, Equatable, CustomStringConvertible, Sendable {
 
     /// Represents an IPv4 route in the routing table.
-    public struct Route: Codable, Hashable, CustomStringConvertible {
+    public struct Route: Codable, Hashable, CustomStringConvertible, Sendable {
 
         /// The destination host or subnet.
         public let destination: String

@@ -26,7 +26,7 @@
 import Foundation
 
 /// Helps expressing integers in bytes, kB, MB, GB.
-public enum DataUnit: UInt, CustomStringConvertible {
+public enum DataUnit: UInt, CustomStringConvertible, Sendable {
     case byte = 1
 
     case kilobyte = 1024

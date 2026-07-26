@@ -28,11 +28,26 @@ import WireGuardKit
 
 extension WireGuard.Configuration {
     public init(wgQuickConfig: String) throws {
-        tunnelConfiguration = try TunnelConfiguration(fromWgQuickConfig: wgQuickConfig)
+        var dnsHTTPSURL: URL?
+        var dnsTLSServerName: String?
+        let tunnelConfiguration = try TunnelConfiguration(
+            fromTunnelKitWgQuickConfig: wgQuickConfig,
+            called: nil,
+            dnsHTTPSURL: &dnsHTTPSURL,
+            dnsTLSServerName: &dnsTLSServerName
+        )
+        self.init(
+            tunnelConfiguration: tunnelConfiguration,
+            dnsHTTPSURL: dnsHTTPSURL,
+            dnsTLSServerName: dnsTLSServerName
+        )
     }
 
     public func asWgQuickConfig() -> String {
-        tunnelConfiguration.asWgQuickConfig()
+        tunnelConfiguration.asTunnelKitWgQuickConfig(
+            dnsHTTPSURL: dnsHTTPSURL,
+            dnsTLSServerName: dnsTLSServerName
+        )
     }
 
     public var endpointRepresentation: String {

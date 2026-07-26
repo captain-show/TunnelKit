@@ -3,26 +3,62 @@ name: Unit Tests
 on:
   push:
     branches:
-      - "master"
+      - "main"
     paths-ignore:
-      - "*.md"
+      - "**/*.md"
   pull_request:
-    types: [ opened, synchronize ]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   run_tests:
-    name: Run tests
-    runs-on: macos-13
-    timeout-minutes: 5
+    name: SwiftPM tests
+    runs-on: macos-15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v3
-      - uses: maxim-lobanov/setup-xcode@v1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
-          xcode-version: '15.1'
+          xcode-version: 'latest-stable'
       - name: Run tests
-        run: |
-          swift test
+        run: swift test --parallel
+      - name: Build release package
+        run: swift build --configuration release
+
+  build_demo:
+    name: Build ${{ matrix.name }}
+    runs-on: macos-15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Demo (iOS Simulator)
+            scheme: TunnelKitDemo-iOS
+            destination: generic/platform=iOS Simulator
+          - name: Demo (iOS device)
+            scheme: TunnelKitDemo-iOS
+            destination: generic/platform=iOS
+          - name: Demo (macOS)
+            scheme: TunnelKitDemo-macOS
+            destination: platform=macOS
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: 'latest-stable'
+      - name: Build
+        run: >-
+          xcodebuild
+          -project Demo/TunnelKit.xcodeproj
+          -scheme "${{ matrix.scheme }}"
+          -destination "${{ matrix.destination }}"
+          -derivedDataPath "$RUNNER_TEMP/DerivedData"
+          CODE_SIGNING_ALLOWED=NO
+          build

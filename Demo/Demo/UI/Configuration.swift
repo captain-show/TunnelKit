@@ -139,7 +139,7 @@ aeb893d9a96d1f15519bb3c4dcb40ee3
 }
 
 extension WireGuard {
-    struct Parameters {
+    struct Parameters: Sendable {
         let title: String
 
         let appGroup: String

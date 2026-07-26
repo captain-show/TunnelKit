@@ -84,7 +84,7 @@ extension OpenVPN {
     }
 }
 
-extension PacketCode: CustomStringConvertible {
+extension PacketCode: @retroactive CustomStringConvertible {
     public var description: String {
         switch self {
         case .softResetV1:          return "SOFT_RESET_V1"

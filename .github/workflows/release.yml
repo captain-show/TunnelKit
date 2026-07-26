@@ -8,29 +8,75 @@ on:
         required: true
 
 env:
-  VERSION: ${{ github.event.inputs.version_number }}
+  VERSION: ${{ inputs.version_number }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   run_tests:
-    name: Run tests
-    runs-on: macos-13
-    timeout-minutes: 10
+    name: SwiftPM tests
+    runs-on: macos-15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v3
-      - uses: maxim-lobanov/setup-xcode@v1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
-          xcode-version: '15.1'
+          xcode-version: 'latest-stable'
       - name: Run tests
-        run: |
-          swift test
+        run: swift test --parallel
+      - name: Build release package
+        run: swift build --configuration release
+
+  build_demo:
+    name: Build ${{ matrix.name }}
+    runs-on: macos-15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Demo (iOS Simulator)
+            scheme: TunnelKitDemo-iOS
+            destination: generic/platform=iOS Simulator
+          - name: Demo (iOS device)
+            scheme: TunnelKitDemo-iOS
+            destination: generic/platform=iOS
+          - name: Demo (macOS)
+            scheme: TunnelKitDemo-macOS
+            destination: platform=macOS
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: 'latest-stable'
+      - name: Build
+        run: >-
+          xcodebuild
+          -project Demo/TunnelKit.xcodeproj
+          -scheme "${{ matrix.scheme }}"
+          -destination "${{ matrix.destination }}"
+          -derivedDataPath "$RUNNER_TEMP/DerivedData"
+          CODE_SIGNING_ALLOWED=NO
+          build
+
   publish_version:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: run_tests
+    needs: [run_tests, build_demo]
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
       - name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@v5
+        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7
         with:
           gpg_private_key: ${{ secrets.GPG_KEY }}
           passphrase: ${{ secrets.GPG_PASSPHRASE }}
@@ -40,7 +86,17 @@ jobs:
           git_push_gpgsign: false
       - name: Tag release
         run: |
-          DATE=`date "+%Y-%m-%d"`
+          SEMVER_PATTERN='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+          if [[ ! "$VERSION" =~ $SEMVER_PATTERN ]]; then
+            echo "Invalid semantic version: $VERSION" >&2
+            exit 1
+          fi
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists" >&2
+            exit 1
+          fi
+
+          DATE="$(date "+%Y-%m-%d")"
           COMMIT_MESSAGE="[ci skip] Set release date"
           TAG_MESSAGE="Release"
 
@@ -48,9 +104,10 @@ jobs:
           git add CHANGELOG.md
           git commit -m "$COMMIT_MESSAGE"
           git tag "v$VERSION" -m "$TAG_MESSAGE"
-          git push && git push --tags
+          git push origin HEAD:main
+          git push origin "v$VERSION"
       - name: Publish
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: "v${{ env.VERSION }}"
           generate_release_notes: true

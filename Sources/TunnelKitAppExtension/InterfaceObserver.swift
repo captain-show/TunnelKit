@@ -45,6 +45,22 @@ import SwiftyBeaver
 
 private let log = SwiftyBeaver.self
 
+private final class ObserverCallback<Callback>: @unchecked Sendable {
+    let callback: Callback
+
+    init(_ callback: Callback) {
+        self.callback = callback
+    }
+}
+
+private final class WeakInterfaceObserver: @unchecked Sendable {
+    weak var value: InterfaceObserver?
+
+    init(_ value: InterfaceObserver) {
+        self.value = value
+    }
+}
+
 /// Observes changes in the current Wi-Fi network.
 public class InterfaceObserver: NSObject {
 
@@ -67,8 +83,9 @@ public class InterfaceObserver: NSObject {
 
         let timer = DispatchSource.makeTimerSource(flags: DispatchSource.TimerFlags(rawValue: UInt(0)), queue: queue)
         timer.schedule(deadline: .now(), repeating: .seconds(2))
+        let observer = WeakInterfaceObserver(self)
         timer.setEventHandler {
-            self.fireWifiChangeObserver()
+            observer.value?.fireWifiChangeObserver()
         }
         timer.resume()
 
@@ -85,8 +102,16 @@ public class InterfaceObserver: NSObject {
     }
 
     private func fireWifiChangeObserver() {
-        InterfaceObserver.fetchCurrentSSID {
-            self.fireWifiChange(withSSID: $0)
+        guard let queue else {
+            return
+        }
+        let observer = WeakInterfaceObserver(self)
+        InterfaceObserver.fetchCurrentSSID { ssid in
+            // fetchCurrent calls back on a system thread; lastWifiName is
+            // confined to the observer queue
+            queue.async {
+                observer.value?.fireWifiChange(withSSID: ssid)
+            }
         }
     }
 
@@ -112,16 +137,17 @@ public class InterfaceObserver: NSObject {
      - Parameter completionHandler: Receives the current Wi-Fi SSID if any.
      **/
     public static func fetchCurrentSSID(completionHandler: @escaping (String?) -> Void) {
+        let completion = ObserverCallback(completionHandler)
         #if os(iOS)
         NEHotspotNetwork.fetchCurrent {
-            completionHandler($0?.ssid)
+            completion.callback($0?.ssid)
         }
         #elseif os(macOS)
         let client = CWWiFiClient.shared()
         let ssid = client.interfaces()?.compactMap { $0.ssid() }.first
-        completionHandler(ssid)
+        completion.callback(ssid)
         #else
-        completionHandler(nil)
+        completion.callback(nil)
         #endif
     }
 }

@@ -42,7 +42,7 @@ import CTunnelKitOpenVPNProtocol
 extension OpenVPN {
 
     /// Represents a cryptographic container in PEM format.
-    public struct CryptoContainer: Codable, Equatable {
+    public struct CryptoContainer: Codable, Equatable, Sendable {
         private static let begin = "-----BEGIN "
 
         private static let end = "-----END "

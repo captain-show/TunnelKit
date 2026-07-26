@@ -67,6 +67,9 @@ public enum OpenVPNError: Error {
     /// A write operation failed at the link layer (e.g. network unreachable).
     case failedLinkWrite
 
+    /// A read operation failed at the link layer (e.g. connection reset or closed by the server).
+    case failedLinkRead
+
     /// The server couldn't ping back before timeout.
     case pingTimeout
 

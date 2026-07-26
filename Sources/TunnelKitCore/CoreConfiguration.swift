@@ -35,9 +35,10 @@
 //
 
 import Foundation
+import os
 
 /// Global library settings.
-public class CoreConfiguration {
+public final class CoreConfiguration {
 
     /// Unique identifier of the library.
     public static let identifier = "com.algoritmico.TunnelKit"
@@ -48,21 +49,27 @@ public class CoreConfiguration {
         guard let info = bundle.infoDictionary else {
             return ""
         }
-//        guard let version = info["CFBundleShortVersionString"] as? String else {
-//            return ""
-//        }
-//        guard let build = info["CFBundleVersion"] as? String else {
-//            return version
-//        }
-//        return "\(version) (\(build))"
         return info["CFBundleShortVersionString"] as? String ?? ""
     }()
 
+    // These two globals are set once at tunnel startup and then read from many
+    // queues (logging is pervasive), so they are guarded by a lock to be
+    // concurrency-safe under strict checking while keeping the public API.
+    private static let _masksPrivateData = OSAllocatedUnfairLock(initialState: true)
+
+    private static let _versionIdentifier = OSAllocatedUnfairLock<String?>(initialState: nil)
+
     /// Masks private data in logs.
-    public static var masksPrivateData = true
+    public static var masksPrivateData: Bool {
+        get { _masksPrivateData.withLock { $0 } }
+        set { _masksPrivateData.withLock { $0 = newValue } }
+    }
 
     /// String representing library version.
-    public static var versionIdentifier: String?
+    public static var versionIdentifier: String? {
+        get { _versionIdentifier.withLock { $0 } }
+        set { _versionIdentifier.withLock { $0 = newValue } }
+    }
 
     /// Enables logging of sensitive data (hardcoded to false).
     public static let logsSensitiveData = false

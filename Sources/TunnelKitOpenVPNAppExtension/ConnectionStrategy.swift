@@ -35,16 +35,17 @@
 //
 
 import Foundation
-import NetworkExtension
+import Network
 import SwiftyBeaver
 import TunnelKitCore
 import TunnelKitAppExtension
 import TunnelKitOpenVPNCore
-import TunnelKitOpenVPNManager
 
 private let log = SwiftyBeaver.self
 
-class ConnectionStrategy {
+/// Queue-confined endpoint iterator used exclusively from the provider's
+/// serial tunnel queue, including DNS completions.
+final class ConnectionStrategy: @unchecked Sendable {
     private var remotes: [ResolvedRemote]
 
     private var currentRemoteIndex: Int
@@ -56,9 +57,10 @@ class ConnectionStrategy {
         return remotes[currentRemoteIndex]
     }
 
-    init(configuration: OpenVPN.Configuration) {
+    init?(configuration: OpenVPN.Configuration) {
         guard let remotes = configuration.processedRemotes, !remotes.isEmpty else {
-            fatalError("No remotes provided")
+            log.error("No remotes provided in configuration")
+            return nil
         }
         self.remotes = remotes.map(ResolvedRemote.init)
         currentRemoteIndex = 0
@@ -91,48 +93,86 @@ class ConnectionStrategy {
     }
 
     func createSocket(
-        from provider: NEProvider,
         timeout: Int,
         queue: DispatchQueue,
-        completionHandler: @escaping (Result<GenericSocket, TunnelKitOpenVPNError>) -> Void) {
+        completionHandler: @escaping @Sendable (Result<GenericSocket, ConnectionError>) -> Void) {
         guard let remote = currentRemote else {
-            completionHandler(.failure(.exhaustedEndpoints))
+            completionHandler(.failure(ConnectionError(
+                .serverUnreachable,
+                stage: .socketConnection,
+                message: "No usable remote endpoints remain."
+            )))
             return
         }
         if remote.isResolved, let endpoint = remote.currentEndpoint {
             log.debug("Pick current endpoint: \(endpoint.maskedDescription)")
-            let socket = provider.createSocket(to: endpoint)
-            completionHandler(.success(socket))
+            completionHandler(ConnectionStrategy.socket(to: endpoint))
             return
         }
 
         log.debug("No resolved endpoints, will resort to DNS resolution")
         log.debug("DNS resolve address: \(remote.maskedDescription)")
 
-        remote.resolve(timeout: timeout, queue: queue) {
+        remote.resolve(timeout: timeout, queue: queue) { result in
+            if case .failure(let error) = result {
+                completionHandler(.failure(error))
+                return
+            }
             guard let endpoint = remote.currentEndpoint else {
                 log.error("No endpoints available")
-                completionHandler(.failure(.dnsFailure))
+                completionHandler(.failure(ConnectionError(
+                    .dnsFailure,
+                    stage: .dnsResolution,
+                    message: "DNS resolution completed without a usable endpoint."
+                )))
                 return
             }
             log.debug("Pick current endpoint: \(endpoint.maskedDescription)")
-            let socket = provider.createSocket(to: endpoint)
-            completionHandler(.success(socket))
+            completionHandler(ConnectionStrategy.socket(to: endpoint))
         }
     }
-}
 
-private extension NEProvider {
-    func createSocket(to endpoint: Endpoint) -> GenericSocket {
-        let ep = NWHostEndpoint(hostname: endpoint.address, port: "\(endpoint.proto.port)")
+    /// Builds an `NWConnection`-backed socket for the given resolved endpoint.
+    private static func socket(to endpoint: Endpoint) -> Result<GenericSocket, ConnectionError> {
+        let host = NWEndpoint.Host(endpoint.address)
+        guard endpoint.proto.port != 0, let port = NWEndpoint.Port(rawValue: endpoint.proto.port) else {
+            return .failure(ConnectionError(
+                .invalidConfiguration,
+                stage: .preparing,
+                message: "A remote endpoint has an invalid port."
+            ))
+        }
+        let nwEndpoint = NWEndpoint.hostPort(host: host, port: port)
+
+        let isReliable: Bool
+        let parameters: NWParameters
         switch endpoint.proto.socketType {
         case .udp, .udp4, .udp6:
-            let impl = createUDPSession(to: ep, from: nil)
-            return NEUDPSocket(impl: impl)
+            isReliable = false
+            parameters = .udp
 
         case .tcp, .tcp4, .tcp6:
-            let impl = createTCPConnection(to: ep, enableTLS: false, tlsParameters: nil, delegate: nil)
-            return NETCPSocket(impl: impl)
+            isReliable = true
+            parameters = .tcp
         }
+
+        // This connection runs inside the packet-tunnel provider and must reach
+        // the VPN server over the real network. The legacy NWUDPSession/
+        // NWTCPConnection transports bypassed the tunnel automatically; a raw
+        // NWConnection does not. Once the tunnel installs its default route, an
+        // unpinned socket routes back into our own utun (an `.other`-type
+        // interface), loses viability, and triggers an endless
+        // disconnect/reconnect loop. Excluding `.other` keeps the socket on the
+        // physical Wi-Fi/cellular/wired interface and lets it follow the device
+        // across network changes (unlike pinning a single fixed interface).
+        parameters.prohibitedInterfaceTypes = [.other]
+
+        return .success(NWConnectionSocket(
+            endpoint: nwEndpoint,
+            parameters: parameters,
+            isReliable: isReliable,
+            remoteHost: endpoint.address,
+            remotePort: endpoint.proto.port
+        ))
     }
 }

@@ -95,6 +95,10 @@ extension XORProcessor {
     }
 
     private static func reverse(packet: Data) -> Data {
-        Data(([UInt8](packet))[0..<1] + ([UInt8](packet)[1...]).reversed())
+        // an empty datagram from the network must not trap the subscripts
+        guard packet.count > 1 else {
+            return packet
+        }
+        return Data(([UInt8](packet))[0..<1] + ([UInt8](packet)[1...]).reversed())
     }
 }

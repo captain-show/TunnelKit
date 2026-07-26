@@ -128,12 +128,15 @@
     NSParameterAssert(string);
 
     if ((self = [super init])) {
-        const char *stringBytes = [string cStringUsingEncoding:NSASCIIStringEncoding];
-        const int stringLength = (int)string.length;
-        
+        NSData *stringData = [string dataUsingEncoding:NSUTF8StringEncoding];
+        NSAssert(stringData != nil, @"NSString must be representable as UTF-8");
+        const NSInteger stringLength = (NSInteger)stringData.length;
+
         _count = stringLength + (nullTerminated ? 1 : 0);
         _bytes = allocate_safely(_count);
-        memcpy(_bytes, stringBytes, stringLength);
+        if (stringLength > 0) {
+            memcpy(_bytes, stringData.bytes, stringLength);
+        }
         if (nullTerminated) {
             _bytes[stringLength] = '\0';
         }
@@ -265,7 +268,7 @@
         return nil;
     }
     const NSInteger stringLength = nullOffset - from;
-    return [[NSString alloc] initWithBytes:_bytes length:stringLength encoding:NSASCIIStringEncoding];
+    return [[NSString alloc] initWithBytes:_bytes + from length:stringLength encoding:NSUTF8StringEncoding];
 }
 
 - (BOOL)isEqualToData:(NSData *)data

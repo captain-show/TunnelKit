@@ -43,6 +43,8 @@ extension WireGuard {
 
             case lastError = "WireGuard.LastError"
 
+            case lastConnectionError = "WireGuard.LastConnectionError"
+
             case dataCount = "WireGuard.DataCount"
         }
 
@@ -57,6 +59,16 @@ extension WireGuard {
         public var debugLogPath: String?
 
         public var debugLogFormat: String?
+
+        /// Real-connectivity validation performed before reporting the tunnel
+        /// as connected. Opt-in: when nil, validation is disabled and the tunnel
+        /// is reported as connected on the OS status alone (legacy behavior).
+        ///
+        /// When set to `.default`/`.strict`, end-to-end DNS and ping probes are
+        /// bound to the packet-tunnel virtual interface on iOS 18/macOS 15 and
+        /// newer; on older systems an enabled configuration fails closed because
+        /// a peer handshake alone does not prove end-to-end network access.
+        public var connectionValidation: ConnectionValidationOptions?
 
         public init(_ title: String, appGroup: String, configuration: WireGuard.Configuration) {
             self.title = title
@@ -106,6 +118,10 @@ extension WireGuard.ProviderConfiguration {
         return defaults?.wireGuardLastError
     }
 
+    public var lastConnectionError: WireGuardConnectionError? {
+        return defaults?.wireGuardLastConnectionError
+    }
+
     public var urlForDebugLog: URL? {
         return defaults?.wireGuardURLForDebugLog(appGroup: appGroup)
     }
@@ -123,6 +139,17 @@ extension WireGuard.ProviderConfiguration {
 
     public func _appexSetLastError(_ newValue: TunnelKitWireGuardError?) {
         defaults?.wireGuardLastError = newValue
+        if newValue == nil {
+            defaults?.wireGuardLastConnectionError = nil
+        }
+    }
+
+    public func _appexSetLastError(
+        _ newValue: TunnelKitWireGuardError,
+        connectionError: ConnectionError
+    ) {
+        defaults?.wireGuardLastError = newValue
+        defaults?.wireGuardLastConnectionError = WireGuardConnectionError(connectionError)
     }
 
     public var _appexDebugLogURL: URL? {
@@ -160,6 +187,23 @@ extension UserDefaults {
                 return
             }
             set(newValue.rawValue, forKey: WireGuard.ProviderConfiguration.Keys.lastError.rawValue)
+        }
+    }
+
+    public fileprivate(set) var wireGuardLastConnectionError: WireGuardConnectionError? {
+        get {
+            guard let data = data(forKey: WireGuard.ProviderConfiguration.Keys.lastConnectionError.rawValue) else {
+                return nil
+            }
+            return try? JSONDecoder().decode(WireGuardConnectionError.self, from: data)
+        }
+        set {
+            guard let newValue,
+                  let data = try? JSONEncoder().encode(newValue) else {
+                removeObject(forKey: WireGuard.ProviderConfiguration.Keys.lastConnectionError.rawValue)
+                return
+            }
+            set(data, forKey: WireGuard.ProviderConfiguration.Keys.lastConnectionError.rawValue)
         }
     }
 

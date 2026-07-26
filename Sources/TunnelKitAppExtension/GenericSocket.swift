@@ -45,6 +45,15 @@ public protocol GenericSocketDelegate: AnyObject {
     func socketDidTimeout(_ socket: GenericSocket)
 
     /**
+     The socket timed out with a detailed reason.
+
+     The default implementation forwards to `socketDidTimeout(_:)`, keeping
+     existing delegates source-compatible while allowing modern transports to
+     preserve the underlying network error.
+     **/
+    func socket(_ socket: GenericSocket, didTimeoutWith error: Error)
+
+    /**
      The socket became active.
      **/
     func socketDidBecomeActive(_ socket: GenericSocket)
@@ -57,9 +66,37 @@ public protocol GenericSocketDelegate: AnyObject {
     func socket(_ socket: GenericSocket, didShutdownWithFailure failure: Bool)
 
     /**
+     The socket shut down, optionally with the detailed failure that caused it.
+
+     The default implementation forwards to the legacy Boolean callback.
+     **/
+    func socket(_ socket: GenericSocket, didShutdownWith error: Error?)
+
+    /**
      The socket has a better path.
      **/
     func socketHasBetterPath(_ socket: GenericSocket)
+
+    /**
+     The viability of an active socket changed.
+
+     A non-viable active connection cannot currently send or receive traffic
+     and must not continue to be reported as healthy.
+     **/
+    func socket(_ socket: GenericSocket, didUpdateViability isViable: Bool)
+}
+
+public extension GenericSocketDelegate {
+    func socket(_ socket: GenericSocket, didTimeoutWith error: Error) {
+        socketDidTimeout(socket)
+    }
+
+    func socket(_ socket: GenericSocket, didShutdownWith error: Error?) {
+        self.socket(socket, didShutdownWithFailure: error != nil)
+    }
+
+    func socket(_ socket: GenericSocket, didUpdateViability isViable: Bool) {
+    }
 }
 
 /// An opaque socket implementation.

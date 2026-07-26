@@ -106,7 +106,7 @@ extension Data {
     }
 
     public mutating func append(nullTerminatedString: String) {
-        append(nullTerminatedString.data(using: .ascii)!)
+        append(Data(nullTerminatedString.utf8))
         append(UInt8(0))
     }
 
@@ -121,7 +121,7 @@ extension Data {
         guard let to = nullOffset else {
             return nil
         }
-        return String(data: subdata(in: from..<to), encoding: .ascii)
+        return String(data: subdata(in: from..<to), encoding: .utf8)
     }
 
     // best

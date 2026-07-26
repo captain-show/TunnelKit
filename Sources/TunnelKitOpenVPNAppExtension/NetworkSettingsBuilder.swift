@@ -38,10 +38,18 @@ struct NetworkSettingsBuilder {
 
     let remoteOptions: OpenVPN.Configuration
 
-    init(remoteAddress: String, localOptions: OpenVPN.Configuration, remoteOptions: OpenVPN.Configuration) {
+    let fallbackDNSServers: [String]
+
+    init(
+        remoteAddress: String,
+        localOptions: OpenVPN.Configuration,
+        remoteOptions: OpenVPN.Configuration,
+        fallbackDNSServers: [String] = []
+    ) {
         self.remoteAddress = remoteAddress
         self.localOptions = localOptions
         self.remoteOptions = remoteOptions
+        self.fallbackDNSServers = fallbackDNSServers
     }
 
     func build() -> NEPacketTunnelNetworkSettings {
@@ -126,6 +134,14 @@ extension NetworkSettingsBuilder {
             servers.append(contentsOf: remoteServers)
         }
         return servers
+    }
+
+    var effectiveDNSServers: [String] {
+        let configuredServers = allDNSServers
+        guard configuredServers.isEmpty, isGateway else {
+            return configuredServers
+        }
+        return fallbackDNSServers
     }
 
     private var dnsDomain: String? {
@@ -261,13 +277,14 @@ extension NetworkSettingsBuilder {
 
         // fall back
         if dnsSettings == nil {
-            let dnsServers = allDNSServers
+            let dnsServers = effectiveDNSServers
             if !dnsServers.isEmpty {
+                if allDNSServers.isEmpty {
+                    log.warning("DNS: No servers provided for a full tunnel, using fall-back servers: \(dnsServers)")
+                }
                 log.info("DNS: Using servers \(dnsServers)")
                 dnsSettings = NEDNSSettings(servers: dnsServers)
             } else {
-//                log.warning("DNS: No servers provided, using fall-back servers: \(fallbackDNSServers)")
-//                dnsSettings = NEDNSSettings(servers: fallbackDNSServers)
                 if isGateway {
                     log.warning("DNS: No settings provided")
                 } else {

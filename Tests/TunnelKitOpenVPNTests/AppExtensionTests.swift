@@ -38,6 +38,7 @@ import XCTest
 import NetworkExtension
 import TunnelKitCore
 import TunnelKitOpenVPNCore
+@testable import TunnelKitOpenVPNProtocol
 import TunnelKitAppExtension
 @testable import TunnelKitOpenVPNAppExtension
 import TunnelKitManager
@@ -99,13 +100,128 @@ class AppExtensionTests: XCTestCase {
         XCTAssertEqual(ovpn?["renegotiatesAfter"] as? TimeInterval, cfg.configuration.renegotiatesAfter)
     }
 
+    func testDetailedConnectionErrorRoundTripsWithoutSecrets() {
+        let suiteName = "TunnelKitOpenVPNTests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+
+        var builder = OpenVPN.ConfigurationBuilder()
+        builder.ca = OpenVPN.CryptoContainer(pem: "test-ca")
+        let configuration = OpenVPN.ProviderConfiguration(
+            "Test",
+            appGroup: suiteName,
+            configuration: builder.build()
+        )
+        let connectionError = ConnectionError(
+            .validationFailed,
+            stage: .validation,
+            message: "The end-to-end probe failed.",
+            diagnostics: [
+                "failedProbes": "dns:example.com",
+                "failureDuration": "15.2",
+                "gracePeriod": "15.0",
+                "operation": "probe",
+                "authToken": "must-not-be-persisted",
+                "password": "must-not-be-persisted",
+                "unknownField": "must-not-be-persisted"
+            ]
+        )
+
+        configuration._appexSetLastError(
+            .connectionValidationFailed,
+            connectionError: connectionError
+        )
+
+        XCTAssertEqual(configuration.lastError, .connectionValidationFailed)
+        XCTAssertEqual(configuration.lastConnectionError?.code, .validationFailed)
+        XCTAssertEqual(configuration.lastConnectionError?.stage, .validation)
+        XCTAssertEqual(configuration.lastConnectionError?.message, "The end-to-end probe failed.")
+        XCTAssertEqual(configuration.lastConnectionError?.diagnostics, [
+            "failedProbes": "dns:example.com",
+            "failureDuration": "15.2",
+            "gracePeriod": "15.0",
+            "operation": "probe"
+        ])
+
+        configuration._appexSetLastError(nil)
+        XCTAssertNil(configuration.lastError)
+        XCTAssertNil(configuration.lastConnectionError)
+    }
+
+    func testSessionsOwnIndependentCAFiles() throws {
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TunnelKitOpenVPNTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: cacheURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+
+        var builder = OpenVPN.ConfigurationBuilder()
+        builder.ca = OpenVPN.CryptoContainer(pem: "test-ca")
+        let configuration = builder.build()
+        var firstSession: OpenVPNSession? = try OpenVPNSession(
+            queue: DispatchQueue(label: "TunnelKitOpenVPNTests.first-session"),
+            configuration: configuration,
+            cachesURL: cacheURL
+        )
+        var secondSession: OpenVPNSession? = try OpenVPNSession(
+            queue: DispatchQueue(label: "TunnelKitOpenVPNTests.second-session"),
+            configuration: configuration,
+            cachesURL: cacheURL
+        )
+
+        XCTAssertNotNil(firstSession)
+        XCTAssertNotNil(secondSession)
+        XCTAssertEqual(try caFiles(in: cacheURL).count, 2)
+
+        firstSession = nil
+        XCTAssertEqual(try caFiles(in: cacheURL).count, 1)
+
+        secondSession = nil
+        XCTAssertTrue(try caFiles(in: cacheURL).isEmpty)
+    }
+
+    func testFullTunnelUsesFallbackDNSWhenServerPushesNone() {
+        let localConfiguration = OpenVPN.ConfigurationBuilder().build()
+        var remoteBuilder = OpenVPN.ConfigurationBuilder()
+        remoteBuilder.ipv4 = IPv4Settings(
+            address: "10.8.0.2",
+            addressMask: "255.255.255.0",
+            defaultGateway: "10.8.0.1"
+        )
+        remoteBuilder.routingPolicies = [.IPv4]
+        let fallbackServers = ["1.1.1.1", "2606:4700:4700::1111"]
+        let builder = NetworkSettingsBuilder(
+            remoteAddress: "198.51.100.1",
+            localOptions: localConfiguration,
+            remoteOptions: remoteBuilder.build(),
+            fallbackDNSServers: fallbackServers
+        )
+
+        XCTAssertEqual(builder.effectiveDNSServers, fallbackServers)
+        XCTAssertEqual(builder.build().dnsSettings?.servers, fallbackServers)
+    }
+
+    func testEncryptedDNSRejectsImplicitDNSProbeEvenWithExplicitFallback() {
+        var options = ConnectionValidationOptions()
+        options.policy = .any
+        options.probes = [
+            .dns(hostname: "example.com", server: nil),
+            .ping(host: "1.1.1.1")
+        ]
+
+        XCTAssertNotNil(EncryptedDNSValidation.error(dnsProtocol: .https, options: options))
+
+        options.probes = [.ping(host: "1.1.1.1")]
+        XCTAssertNil(EncryptedDNSValidation.error(dnsProtocol: .https, options: options))
+        XCTAssertNil(EncryptedDNSValidation.error(dnsProtocol: .tls, options: options))
+        XCTAssertNil(EncryptedDNSValidation.error(dnsProtocol: .plain, options: .default))
+    }
+
     func testDNSResolver() {
         let exp = expectation(description: "DNS")
-        DNSResolver.resolve("www.google.com", timeout: 1000, queue: .main) {
+        DNSResolver.resolve("www.google.com", timeout: 1000, queue: .main) { result in
             defer {
                 exp.fulfill()
             }
-            switch $0 {
+            switch result {
             case .success:
                 break
 
@@ -113,7 +229,16 @@ class AppExtensionTests: XCTestCase {
                 break
             }
         }
-        waitForExpectations(timeout: 5.0, handler: nil)
+        wait(for: [exp], timeout: 5.0)
+    }
+
+    private func caFiles(in directory: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter {
+            $0.lastPathComponent.hasPrefix("ca-") && $0.pathExtension == "pem"
+        }
     }
 
     func testDNSAddressConversion() {
@@ -146,7 +271,10 @@ class AppExtensionTests: XCTestCase {
             .init(hostname, .init(.udp, 1111)),
             .init(hostname, .init(.udp4, 3333))
         ]
-        let strategy = ConnectionStrategy(configuration: builder.build())
+        guard let strategy = ConnectionStrategy(configuration: builder.build()) else {
+            XCTFail("No connection strategy for configuration with remotes")
+            return
+        }
 
         let expected = [
             "italy.privateinternetaccess.com:TCP6:2222",
