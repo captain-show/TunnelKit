@@ -797,13 +797,19 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
 
     // Ruby: push_request
     private func pushRequest() {
-        guard let negotiationKey, let tls = negotiationKey.tlsOptional else {
+        guard let negotiationKey else {
             if !isStopping {
-                deferStop(.shutdown, internalInvariantError("Cannot push configuration without an active TLS context."))
+                deferStop(.shutdown, internalInvariantError("Cannot push configuration without a negotiation key."))
             }
             return
         }
         guard negotiationKey.controlState == .preIfConfig else {
+            return
+        }
+        guard let tls = negotiationKey.tlsOptional else {
+            if !isStopping {
+                deferStop(.shutdown, internalInvariantError("Cannot push configuration without an active TLS context."))
+            }
             return
         }
         guard let targetDate = nextPushRequestDate, Date() > targetDate else {

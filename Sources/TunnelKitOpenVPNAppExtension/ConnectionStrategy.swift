@@ -156,17 +156,6 @@ final class ConnectionStrategy: @unchecked Sendable {
             parameters = .tcp
         }
 
-        // This connection runs inside the packet-tunnel provider and must reach
-        // the VPN server over the real network. The legacy NWUDPSession/
-        // NWTCPConnection transports bypassed the tunnel automatically; a raw
-        // NWConnection does not. Once the tunnel installs its default route, an
-        // unpinned socket routes back into our own utun (an `.other`-type
-        // interface), loses viability, and triggers an endless
-        // disconnect/reconnect loop. Excluding `.other` keeps the socket on the
-        // physical Wi-Fi/cellular/wired interface and lets it follow the device
-        // across network changes (unlike pinning a single fixed interface).
-        parameters.prohibitedInterfaceTypes = [.other]
-
         return .success(NWConnectionSocket(
             endpoint: nwEndpoint,
             parameters: parameters,

@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OpenVPN: DNS, socket, session, network-settings, validation and stop callbacks are fenced to their owning attempt; stale callbacks can no longer complete or tear down a newer connection.
 - OpenVPN: full-tunnel profiles without pushed DNS now apply the advertised fallback DNS servers; DoH/DoT profiles must use a compatible explicit validation probe instead of treating plaintext UDP/53 as encrypted-DNS evidence.
 - OpenVPN: established connections enter `reasserting` only after transport or continuous end-to-end monitoring remains unavailable for the configured grace period; transient viability and `betterPath` notifications no longer cause status flapping or reconnect loops.
+- OpenVPN: provider-originated `NWConnection` transports no longer exclude `.other` interfaces. NetworkExtension already keeps those connections off their own tunnel, while `.other` also includes unknown transports and could leave the VPN server socket without a usable path.
+- OpenVPN: a route or handshake failure now advances to the next resolved server address for UDP as well as TCP, allowing IPv4 fallback when an IPv6 address is returned on an IPv4-only network instead of retrying the unreachable address forever.
+- OpenVPN: the negotiation loop no longer treats the normal pre-TLS state as an invariant failure by attempting `PUSH_REQUEST` before the TLS handshake exists.
+- `NetworkExtensionVPN` now removes duplicate saved managers for the selected provider and disables their On-Demand rules before removal, preventing competing profiles from repeatedly superseding each other.
 - WireGuard: persistent connectivity loss now enters `reasserting` while the backend recovers in place instead of cancelling the provider and triggering an on-demand disconnect/connect loop.
 - OpenVPN: the stop watchdog and normal shutdown path can no longer invoke the stop completion handler twice.
 - OpenVPN: authentication tokens in `PUSH_REPLY` messages are fully redacted before logging.

@@ -889,11 +889,13 @@ extension OpenVPNTunnelProvider: GenericSocketDelegate {
             return
         }
         log.debug("Socket timed out waiting for activity, cancelling...")
+        let shouldAdvanceEndpoint = Self.shouldAdvanceEndpoint(after: error)
         finishSocketAttempt(
             socket: socket,
             error: error,
             shouldReconnect: true,
-            shouldAdvanceEndpoint: (socket as? NWConnectionSocket)?.isReliable == true,
+            shouldAdvanceEndpoint: shouldAdvanceEndpoint,
+            countsAsLinkFailure: !shouldAdvanceEndpoint,
             attempt: attempt
         )
     }
@@ -968,18 +970,7 @@ extension OpenVPNTunnelProvider: GenericSocketDelegate {
             if finalError as? OpenVPNError == nil {
                 self.pendingUpgradedSocket = socket.upgraded() ?? self.pendingUpgradedSocket
             }
-            let shouldAdvanceEndpoint: Bool
-            if let connectionError = finalError as? ConnectionError {
-                switch connectionError.code {
-                case .connectionRefused, .serverUnreachable, .connectionTimeout:
-                    shouldAdvanceEndpoint = true
-
-                default:
-                    shouldAdvanceEndpoint = false
-                }
-            } else {
-                shouldAdvanceEndpoint = false
-            }
+            let shouldAdvanceEndpoint = Self.shouldAdvanceEndpoint(after: finalError)
             self.finishSocketAttempt(
                 socket: socket,
                 error: finalError,
@@ -1477,26 +1468,35 @@ extension OpenVPNTunnelProvider: OpenVPNSessionDelegate {
         refreshDataCount()
 
         let finalError = error ?? pendingSocketError
-        let didTimeoutNegotiation: Bool
-        if case .negotiationTimeout = finalError as? OpenVPNError {
-            didTimeoutNegotiation = true
-        } else if let connectionError = finalError as? ConnectionError,
-                  connectionError.code == .handshakeTimeout {
-            didTimeoutNegotiation = true
-        } else {
-            didTimeoutNegotiation = false
-        }
+        let shouldAdvanceEndpoint = Self.shouldAdvanceEndpoint(after: finalError)
 
         finishSocketAttempt(
             socket: socket,
             error: finalError,
             shouldReconnect: shouldReconnect,
-            shouldAdvanceEndpoint: didTimeoutNegotiation,
+            shouldAdvanceEndpoint: shouldAdvanceEndpoint,
             countsAsLinkFailure: (finalError as? ConnectionError).map {
-                $0.code == .connectionLost || $0.code == .networkUnavailable
+                !shouldAdvanceEndpoint && ($0.code == .connectionLost || $0.code == .networkUnavailable)
             } ?? false,
             attempt: attempt
         )
+    }
+
+    static func shouldAdvanceEndpoint(after error: Error?) -> Bool {
+        if case .negotiationTimeout = error as? OpenVPNError {
+            return true
+        }
+
+        guard let connectionError = error as? ConnectionError else {
+            return false
+        }
+
+        switch connectionError.code {
+            case .connectionRefused, .serverUnreachable, .connectionTimeout, .networkUnavailable, .handshakeTimeout:
+                return true
+            default:
+                return false
+        }
     }
 
     private func bringNetworkUp(remoteAddress: String, localOptions: OpenVPN.Configuration, remoteOptions: OpenVPN.Configuration, completionHandler: @escaping @Sendable (Error?) -> Void) {

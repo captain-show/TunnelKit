@@ -221,10 +221,9 @@ public class NetworkExtensionVPN: VPN, @unchecked Sendable {
             onDemandRules: extra?.onDemandRules ?? []
         )
 
-        // remove others afterwards (to avoid permission request)
-        await retainManagers(managers) {
-            $0.isTunnel(withIdentifier: tunnelBundleIdentifier)
-        }
+        await removeManagers(
+            Self.obsoleteManagers(from: managers, retaining: targetManager)
+        )
 
         return targetManager
     }
@@ -260,16 +259,31 @@ public class NetworkExtensionVPN: VPN, @unchecked Sendable {
         }
     }
 
-    private func retainManagers(_ managers: [NETunnelProviderManager], isIncluded: (NETunnelProviderManager) -> Bool) async {
-        let others = managers.filter {
-            !isIncluded($0)
-        }
-        guard !others.isEmpty else {
+    static func obsoleteManagers(from managers: [NETunnelProviderManager],
+                                 retaining targetManager: NETunnelProviderManager) -> [NETunnelProviderManager] {
+        managers.filter { $0 !== targetManager }
+    }
+
+    private func removeManagers(_ managers: [NETunnelProviderManager]) async {
+        guard !managers.isEmpty else {
             return
         }
-        for o in others {
+
+        for manager in managers {
+            manager.isOnDemandEnabled = false
+            manager.onDemandRules = []
+            manager.isEnabled = false
+
             do {
-                try await o.removeFromPreferences()
+                try await manager.saveToPreferences()
+            } catch {
+                log.error("Unable to disable obsolete VPN profile: \(error)")
+            }
+
+            manager.connection.stopVPNTunnel()
+
+            do {
+                try await manager.removeFromPreferences()
             } catch {
                 log.error("Unable to remove obsolete VPN profile: \(error)")
             }

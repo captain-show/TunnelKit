@@ -35,6 +35,7 @@
 //
 
 import XCTest
+import Network
 import NetworkExtension
 import TunnelKitCore
 import TunnelKitOpenVPNCore
@@ -178,6 +179,31 @@ class AppExtensionTests: XCTestCase {
 
         secondSession = nil
         XCTAssertTrue(try caFiles(in: cacheURL).isEmpty)
+    }
+
+    func testStartingSessionDoesNotRequestPushBeforeTLSHandshake() throws {
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TunnelKitOpenVPNTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: cacheURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+
+        var builder = OpenVPN.ConfigurationBuilder()
+        builder.ca = OpenVPN.CryptoContainer(pem: "test-ca")
+        let queue = DispatchQueue(label: "TunnelKitOpenVPNTests.session-start")
+        let session = try OpenVPNSession(
+            queue: queue,
+            configuration: builder.build(),
+            cachesURL: cacheURL
+        )
+        let link = RecordingLink()
+
+        queue.sync {
+            session.setLink(link)
+            XCTAssertFalse(session.isStopping)
+            XCTAssertNil(session.stopError)
+            XCTAssertFalse(link.writtenPackets.isEmpty)
+        }
+        session.cleanup()
     }
 
     func testFullTunnelUsesFallbackDNSWhenServerPushesNone() {
@@ -396,6 +422,66 @@ class AppExtensionTests: XCTestCase {
         }
     }
 
+    func testProviderSocketsDoNotExcludeOtherNetworkInterfaces() {
+        let queue = DispatchQueue(label: "AppExtensionTests.ConnectionStrategy")
+        let socketTypes: [SocketType] = [.udp, .tcp]
+
+        for socketType in socketTypes {
+            var builder = OpenVPN.ConfigurationBuilder()
+            builder.remotes = [
+                .init("198.51.100.1", .init(socketType, 1194))
+            ]
+            guard let strategy = ConnectionStrategy(configuration: builder.build()) else {
+                XCTFail("No connection strategy for \(socketType)")
+                continue
+            }
+
+            let socketCreated = expectation(description: "\(socketType) socket created")
+            strategy.createSocket(timeout: 1_000, queue: queue) { result in
+                switch result {
+                case .success(let genericSocket):
+                    guard let socket = genericSocket as? NWConnectionSocket else {
+                        XCTFail("Unexpected socket type: \(type(of: genericSocket))")
+                        socketCreated.fulfill()
+                        return
+                    }
+                    XCTAssertNil(socket.connection.parameters.prohibitedInterfaceTypes)
+
+                case .failure(let error):
+                    XCTFail("Unable to create \(socketType) socket: \(error)")
+                }
+                socketCreated.fulfill()
+            }
+            wait(for: [socketCreated], timeout: 2)
+        }
+    }
+
+    func testPreConnectionRouteFailureAdvancesToNextResolvedEndpoint() {
+        let errorsThatRequireFallback: [ConnectionError] = [
+            .init(.connectionRefused, stage: .socketConnection),
+            .init(.serverUnreachable, stage: .socketConnection),
+            .init(.connectionTimeout, stage: .socketConnection),
+            .init(.networkUnavailable, stage: .socketConnection),
+            .init(.handshakeTimeout, stage: .protocolHandshake)
+        ]
+
+        for error in errorsThatRequireFallback {
+            XCTAssertTrue(
+                OpenVPNTunnelProvider.shouldAdvanceEndpoint(after: error),
+                "Expected endpoint fallback for \(error.code)"
+            )
+        }
+        XCTAssertTrue(
+            OpenVPNTunnelProvider.shouldAdvanceEndpoint(after: OpenVPNError.negotiationTimeout)
+        )
+        XCTAssertFalse(
+            OpenVPNTunnelProvider.shouldAdvanceEndpoint(
+                after: ConnectionError(.connectionLost, stage: .monitoring)
+            )
+        )
+        XCTAssertFalse(OpenVPNTunnelProvider.shouldAdvanceEndpoint(after: nil))
+    }
+
 //    func testEndpointCycling4() {
 //        CoreConfiguration.masksPrivateData = false
 //
@@ -451,4 +537,32 @@ class AppExtensionTests: XCTestCase {
 //            strategy.tryNextEndpoint()
 //        }
 //    }
+}
+
+private final class RecordingLink: LinkInterface {
+    let isReliable = false
+
+    let remoteAddress: String? = "198.51.100.1"
+
+    let remoteProtocol: String? = "UDP:1194"
+
+    let packetBufferSize = 200
+
+    private(set) var writtenPackets: [Data] = []
+
+    func setReadHandler(
+        queue: DispatchQueue,
+        _ handler: @escaping ([Data]?, Error?) -> Void
+    ) {
+    }
+
+    func writePacket(_ packet: Data, completionHandler: ((Error?) -> Void)?) {
+        writtenPackets.append(packet)
+        completionHandler?(nil)
+    }
+
+    func writePackets(_ packets: [Data], completionHandler: ((Error?) -> Void)?) {
+        writtenPackets.append(contentsOf: packets)
+        completionHandler?(nil)
+    }
 }
