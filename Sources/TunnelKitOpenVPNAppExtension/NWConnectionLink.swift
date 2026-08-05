@@ -156,6 +156,13 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
 
     private var consecutiveReceiveFailures = 0
 
+    /// Non-zero while an `armReceives()` activation is on the stack. A completion
+    /// that finds it non-zero was delivered INLINE, from inside that activation's
+    /// loop, and must not recurse. See `armReceives()`.
+    private var armDepth = 0
+
+    private var wantsMoreReceives = false
+
     private var queue: DispatchQueue?
 
     init(connection: NWConnection, maxDatagrams: Int = 200, xorMethod: OpenVPN.XORMethod?, remoteHost: String?, remotePort: UInt16) {
@@ -190,16 +197,37 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
     }
 
     /// Tops the in-flight receives back up to `maxOutstandingReceives`.
+    ///
+    /// Re-arming must never nest. `NWConnection` may invoke a receive completion
+    /// INLINE — on this very thread, before `receiveMessage` returns — when a
+    /// datagram is already buffered, which is the normal case while the link is
+    /// saturated. Recursing there keeps every level's decrypt-and-write chain on
+    /// the stack at once and blows the 512 KB GCD worker stack.
+    ///
+    /// `armDepth` distinguishes the two deliveries. A completion delivered as its
+    /// own work item finds it zero and becomes the outermost activation, which is
+    /// the normal path and must be allowed to arm. A completion delivered inline
+    /// finds it non-zero, so it only records the demand and lets the activation
+    /// already looping below it satisfy it — turning the recursion into iteration.
     private func armReceives() {
-        while isReceiving, outstandingReceives < Self.maxOutstandingReceives {
-            outstandingReceives += 1
-            receiveOneDatagram()
+        guard armDepth == 0 else {
+            wantsMoreReceives = true
+            return
         }
+        armDepth += 1
+        defer { armDepth -= 1 }
+        repeat {
+            wantsMoreReceives = false
+            while isReceiving, outstandingReceives < Self.maxOutstandingReceives {
+                outstandingReceives += 1
+                receiveOneDatagram()
+            }
+        } while wantsMoreReceives && isReceiving
     }
 
     private func receiveOneDatagram() {
         connection.receiveMessage { [weak self] data, _, isComplete, error in
-            // delivered on the connection queue (== read queue)
+            // delivered on the connection queue (== read queue), possibly inline
             guard let self else {
                 return
             }
