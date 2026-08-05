@@ -272,6 +272,26 @@ final class NWConnectionSocketTests: XCTestCase {
         socket.shutdown()
     }
 
+    /// Only a missing network path buys extra connect time. Everything else —
+    /// above all a refused connection — must still fail on the first deadline,
+    /// or every unreachable endpoint would take twice as long to give up.
+    func test_givenNonPathError_whenClassifyingForConnectDeadline_thenNoExtension() {
+        let socket = makeSocket(port: 9, reliable: false)
+        for code in [POSIXErrorCode.ENETDOWN, .ENETUNREACH, .EHOSTDOWN, .EHOSTUNREACH] {
+            XCTAssertTrue(
+                socket.isPathUnavailable(.posix(code)),
+                "\(code) means the path is not up yet; NWConnection recovers on its own"
+            )
+        }
+        for code in [POSIXErrorCode.ECONNREFUSED, .ETIMEDOUT, .ECONNRESET, .EACCES] {
+            XCTAssertFalse(
+                socket.isPathUnavailable(.posix(code)),
+                "\(code) must fail on the first deadline"
+            )
+        }
+        XCTAssertFalse(socket.isPathUnavailable(.dns(DNSServiceErrorType(kDNSServiceErr_Timeout))))
+    }
+
     func test_shutdown_reportsSingleTerminalEvent() throws {
         let server = try EchoServer(isStream: false)
         defer { server.stop() }

@@ -74,6 +74,14 @@ public final class NWConnectionSocket: GenericSocket, @unchecked Sendable {
 
     private var activeTimeoutWorkItem: DispatchWorkItem?
 
+    /// The queue every handler is delivered on, kept so the connect deadline can
+    /// be rescheduled from within a handler.
+    private var observedQueue: DispatchQueue?
+
+    /// The connect deadline is extended at most once for an unavailable path, so
+    /// a genuinely offline device still fails in bounded time.
+    private var didExtendForUnavailablePath = false
+
     private var waitingError: NWError?
 
     private var lastViability: Bool?
@@ -124,18 +132,44 @@ public final class NWConnectionSocket: GenericSocket, @unchecked Sendable {
             self?.handleViability(isViable)
         }
 
-        // Retain a cancellable work item so readiness/unobserve prevents a
-        // stale timeout from racing a later state transition.
+        observedQueue = queue
+        didExtendForUnavailablePath = false
+
+        scheduleActiveTimeout(queue: queue, milliseconds: activeTimeout)
+
+        connection.start(queue: queue)
+    }
+
+    /// Retains a cancellable work item so readiness/unobserve prevents a stale
+    /// timeout from racing a later state transition.
+    private func scheduleActiveTimeout(queue: DispatchQueue?, milliseconds: Int) {
+        guard let queue else {
+            return
+        }
+        activeTimeoutWorkItem?.cancel()
         let timeoutWorkItem = DispatchWorkItem { [weak self] in
-            self?.handleActiveTimeout(milliseconds: activeTimeout)
+            self?.handleActiveTimeout(milliseconds: milliseconds)
         }
         activeTimeoutWorkItem = timeoutWorkItem
         queue.asyncAfter(
-            deadline: .now() + .milliseconds(max(0, activeTimeout)),
+            deadline: .now() + .milliseconds(max(0, milliseconds)),
             execute: timeoutWorkItem
         )
+    }
 
-        connection.start(queue: queue)
+    /// Whether the connection is only waiting for a usable network path, which
+    /// `NWConnection` recovers from by itself.
+    func isPathUnavailable(_ error: NWError) -> Bool {
+        guard case .posix(let code) = error else {
+            return false
+        }
+        switch code {
+        case .ENETDOWN, .ENETUNREACH, .EHOSTDOWN, .EHOSTUNREACH:
+            return true
+
+        default:
+            return false
+        }
     }
 
     public func unobserve() {
@@ -183,13 +217,16 @@ public final class NWConnectionSocket: GenericSocket, @unchecked Sendable {
             waitingError = error
             isReady = false
 
+            // An established socket falling back to `.waiting` is a dead link
+            // that reports nothing else, so this has to be visible without debug
+            // logging enabled.
             if isActive {
                 log.warning("Socket went back to waiting while active: \(error)")
             } else {
                 log.debug("Socket state: waiting (\(error))")
             }
 
-                if isActive, lastViability != false {
+            if isActive, lastViability != false {
                 handleViability(false)
             }
 
@@ -277,6 +314,20 @@ public final class NWConnectionSocket: GenericSocket, @unchecked Sendable {
         guard !isActive, !isShutdown, !didTimeout else {
             return
         }
+
+        // A tunnel extension that has just been restarted races the teardown of
+        // the previous utun: for the first seconds there is no usable route, so
+        // the connection parks in `.waiting(ENETDOWN)`. `NWConnection` recovers
+        // from that on its own — it is retrying, not wedged — but the connect
+        // deadline used to cut it off, burning a whole attempt plus the
+        // reconnection delay on every restart. Grant it one more window instead.
+        if let waitingError, isPathUnavailable(waitingError), !didExtendForUnavailablePath {
+            didExtendForUnavailablePath = true
+            log.warning("No usable path yet (\(waitingError)), extending the connect deadline by \(milliseconds) ms")
+            scheduleActiveTimeout(queue: observedQueue, milliseconds: milliseconds)
+            return
+        }
+
         didTimeout = true
         activeTimeoutWorkItem = nil
 
