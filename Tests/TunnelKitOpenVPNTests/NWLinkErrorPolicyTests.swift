@@ -54,4 +54,39 @@ final class NWLinkErrorPolicyTests: XCTestCase {
         XCTAssertFalse(NWLinkErrorPolicy.isRecoverable(error))
         XCTAssertFalse(NWLinkErrorPolicy.classify(error, operation: "read") is TransientLinkError)
     }
+
+    /// A datagram link must never turn a single failed send into a link failure:
+    /// there is nothing to lose but that packet, and escalating it reconnected the
+    /// tunnel during saturated uploads. Liveness comes from the connection state
+    /// and the keep-alive timeout instead.
+    func test_givenAnySendFailureOnDatagramLink_whenReportingUpwards_thenIsTransient() throws {
+        let connection = NWConnection(
+            to: .hostPort(host: "127.0.0.1", port: 1),
+            using: .udp
+        )
+        let link = NWUDPLink(
+            connection: connection,
+            xorMethod: nil,
+            remoteHost: "127.0.0.1",
+            remotePort: 1
+        )
+        // errors a saturated or torn-down datagram socket really produces
+        let failures: [NWError] = [
+            .posix(.ENOBUFS),
+            .posix(.ECONNREFUSED),
+            .posix(.EHOSTUNREACH),
+            .posix(.ENETUNREACH),
+            .posix(.ECANCELED),
+            .posix(.EPIPE)
+        ]
+        for failure in failures {
+            let reported = try XCTUnwrap(link.reportableSendFailure(failure))
+            XCTAssertTrue(
+                reported.isTransientLinkFailure,
+                "\(failure) must not tear down a datagram link"
+            )
+        }
+        XCTAssertNil(link.reportableSendFailure(nil))
+        connection.cancel()
+    }
 }

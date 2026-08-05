@@ -1405,12 +1405,17 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
 
     private func linkFailure(operation: String, underlying error: Error) -> ConnectionError {
         let isEstablished = currentKey?.controlState == .connected
+        var diagnostics = ["operation": operation]
+
+        if let posixCode = error.posixErrorCode {
+            diagnostics["errno"] = String(posixCode)
+        }
         return ConnectionError(
             isEstablished ? .connectionLost : .serverUnreachable,
             stage: isEstablished ? .monitoring : .protocolHandshake,
             message: "The OpenVPN transport failed during \(operation).",
             underlying: error,
-            diagnostics: ["operation": operation]
+            diagnostics: diagnostics
         )
     }
 

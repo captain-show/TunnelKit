@@ -78,7 +78,10 @@ extension Error {
     }
 
     /// The POSIX code behind this error, when it carries one.
-    var posixErrorCode: Int32? {
+    ///
+    /// Worth recording in diagnostics: a persisted `ConnectionError` drops the
+    /// underlying error, and the errno is usually the whole story.
+    public var posixErrorCode: Int32? {
         if let posixError = self as? POSIXError {
             return posixError.code.rawValue
         }

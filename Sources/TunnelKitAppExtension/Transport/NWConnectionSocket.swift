@@ -182,8 +182,14 @@ public final class NWConnectionSocket: GenericSocket, @unchecked Sendable {
             // if this state persists.
             waitingError = error
             isReady = false
-            log.debug("Socket state: waiting (\(error))")
-            if isActive, lastViability != false {
+
+            if isActive {
+                log.warning("Socket went back to waiting while active: \(error)")
+            } else {
+                log.debug("Socket state: waiting (\(error))")
+            }
+
+                if isActive, lastViability != false {
                 handleViability(false)
             }
 

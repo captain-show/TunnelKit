@@ -132,6 +132,8 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
 
     private static let maxBatchedDatagrams = 64
 
+    private static let maxConsecutiveReceiveFailures = 100
+
     private let connection: NWConnection
 
     private let maxDatagrams: Int
@@ -151,6 +153,8 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
     private var isFlushScheduled = false
 
     private var isReceiving = false
+
+    private var consecutiveReceiveFailures = 0
 
     private var queue: DispatchQueue?
 
@@ -205,31 +209,26 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
             }
 
             if let error {
-                if let nwError = error as? NWError, NWLinkErrorPolicy.isRecoverable(nwError) {
-                    log.debug("Recoverable datagram receive failure, continuing: \(error)")
-                    self.armReceives()
+                self.consecutiveReceiveFailures += 1
+                guard self.consecutiveReceiveFailures <= Self.maxConsecutiveReceiveFailures, !self.isConnectionFinished else {
+                    log.error("Datagram receive failed \(self.consecutiveReceiveFailures)x in a row, stopping reads: \(error)")
+                    self.stopReceiving()
+                    self.flushPendingDatagrams()
                     return
                 }
-                self.stopReceiving()
-                self.flushPendingDatagrams()
-                self.readHandler?(nil, error)
+                log.debug("Datagram receive failure, dropping and continuing: \(error)")
+                self.armReceives()
                 return
             }
+            self.consecutiveReceiveFailures = 0
 
             if let data, !data.isEmpty {
                 self.pendingDatagrams.append(data)
             }
 
-            // NOTE: for a UDP NWConnection, `isComplete` is true for EVERY
-            // datagram (each datagram is one complete message), so it must NOT
-            // be treated as end-of-connection the way TCP streams are. The
-            // connection is only done when a completion arrives with no content
-            // AND isComplete (delivered on cancel/close); stop the loop then to
-            // avoid re-arming forever on a dead connection.
             if isComplete && data == nil {
                 self.stopReceiving()
                 self.flushPendingDatagrams()
-                self.readHandler?(nil, NWLinkError.remoteClosed)
                 return
             }
 
@@ -269,6 +268,16 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
         isReceiving = false
     }
 
+    private var isConnectionFinished: Bool {
+        switch connection.state {
+        case .cancelled, .failed:
+            return true
+
+        default:
+            return false
+        }
+    }
+
     func writePacket(_ packet: Data, completionHandler: ((Error?) -> Void)?) {
         let dataToUse = xor.processPacket(packet, outbound: true)
         let completion = completionHandler.map(UncheckedSendableCallback.init)
@@ -297,8 +306,19 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
         }
     }
 
+    /// On a datagram link EVERY send failure is a lost datagram, not a lost link:
+    /// there is no ordering or delivery guarantee to break, and the peer is told
+    /// nothing either way. Escalating one of these to the session tore the tunnel
+    /// down during a saturated upload — the second half of a speedtest.
+    /// Genuine link death still arrives via the connection state and the
+    /// keep-alive timeout.
     private static func sendFailure(_ error: NWError?) -> Error? {
-        error.map { NWLinkErrorPolicy.classify($0, operation: "write") }
+        error.map { TransientLinkError(operation: "write", underlying: $0) }
+    }
+
+    /// Exposed for tests: what a send completion reports to the session.
+    func reportableSendFailure(_ error: NWError?) -> Error? {
+        Self.sendFailure(error)
     }
 }
 
@@ -359,7 +379,7 @@ final class NWTCPLink: LinkInterface, @unchecked Sendable {
                 return
             }
             if let error {
-                if let nwError = error as? NWError, NWLinkErrorPolicy.isRecoverable(nwError) {
+                if NWLinkErrorPolicy.isRecoverable(error) {
                     log.debug("Recoverable stream receive failure, continuing: \(error)")
                     self.loopReadStream()
                     return
