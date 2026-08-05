@@ -49,6 +49,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, assign) uint32_t maxPacketId;
 
+/// Inbound packets discarded because they could not be authenticated, decrypted
+/// or parsed. Individually harmless — a datagram link loses and corrupts
+/// packets by design — but a rising count points at a misconfiguration
+/// (e.g. server-side compression the client cannot decode).
+@property (nonatomic, readonly) uint64_t droppedInboundPackets;
+
+/// Inbound packets discarded specifically because the compression framing or
+/// algorithm could not be decoded.
+@property (nonatomic, readonly) uint64_t droppedCompressedInboundPackets;
+
+/// Inbound packets discarded by replay protection.
+@property (nonatomic, readonly) uint64_t droppedReplayedInboundPackets;
+
 - (instancetype)initWithEncrypter:(id<DataPathEncrypter>)encrypter
                         decrypter:(id<DataPathDecrypter>)decrypter
                            peerId:(uint32_t)peerId // 24-bit, discard most significant byte

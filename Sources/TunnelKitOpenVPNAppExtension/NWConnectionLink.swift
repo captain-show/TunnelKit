@@ -47,6 +47,42 @@ enum NWLinkError: Error {
     case remoteClosed
 }
 
+/// Tells apart the `NWError`s that cost one packet from the ones that cost the
+/// link.
+///
+/// Under sustained throughput `NWConnection` reports per-operation POSIX
+/// failures — `ENOBUFS` when the socket buffer is full, `EAGAIN`, `ENOMEM`,
+/// `EINTR` — while staying `.ready` and perfectly usable. Reporting those as
+/// link failures made the OpenVPN session reconnect (or shut down) the moment
+/// traffic picked up, so a plain file download reproducibly dropped the tunnel.
+enum NWLinkErrorPolicy {
+
+    /// POSIX failures that cost a single datagram and leave the link usable.
+    private static let recoverableCodes: Set<POSIXErrorCode> = [
+        .ENOBUFS,   // socket buffer full: the classic high-throughput failure
+        .ENOMEM,    // transient memory pressure in the networking stack
+        .EAGAIN,    // == EWOULDBLOCK, the operation would have blocked
+        .EINTR,     // interrupted syscall
+        .EMSGSIZE,  // oversized datagram: only this packet is undeliverable
+        .ENOSPC     // reported in place of ENOBUFS by some paths
+    ]
+
+    static func classify(_ error: NWError, operation: String) -> Error {
+        guard case .posix(let code) = error,
+              recoverableCodes.contains(code) else {
+            return error
+        }
+        return TransientLinkError(operation: operation, underlying: error)
+    }
+
+    static func isRecoverable(_ error: NWError) -> Bool {
+        guard case .posix(let code) = error else {
+            return false
+        }
+        return recoverableCodes.contains(code)
+    }
+}
+
 /// Aggregates every completion in one UDP send batch. A failure from an early
 /// datagram must not be lost merely because the final datagram succeeded.
 private final class SendBatchCompletion: @unchecked Sendable {
@@ -64,7 +100,7 @@ private final class SendBatchCompletion: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        if firstError == nil {
+        if let error, firstError == nil || (firstError?.isTransientLinkFailure == true && !error.isTransientLinkFailure) {
             firstError = error
         }
         remaining -= 1
@@ -78,8 +114,24 @@ private final class SendBatchCompletion: @unchecked Sendable {
 /// started on the read queue by `NWConnectionSocket`, so every receive/send
 /// completion is delivered on that single serial queue. `setReadHandler` must
 /// be called with that same queue (it always is, in `OpenVPNTunnelProvider`).
-/// All mutable state is confined to that queue.
+/// All mutable state — including the in-flight receive count and the pending
+/// batch — is confined to that queue, which is also why several concurrent
+/// receives cannot interleave: their completions are serialized there.
 final class NWUDPLink: LinkInterface, @unchecked Sendable {
+
+    /// Receives kept in flight at once.
+    ///
+    /// With a single outstanding `receiveMessage` the kernel can only hand over
+    /// the next datagram after this process has finished decrypting the previous
+    /// one and writing it to the tunnel. At download rates that means the socket
+    /// buffer overflows, which shows up as heavy packet loss and `ENOBUFS`.
+    /// Several concurrent receives let the buffer keep draining while a batch is
+    /// being processed. `NWConnection` still delivers the completions in arrival
+    /// order on the (serial) connection queue, so datagram ordering is intact.
+    private static let maxOutstandingReceives = 8
+
+    private static let maxBatchedDatagrams = 64
+
     private let connection: NWConnection
 
     private let maxDatagrams: Int
@@ -91,6 +143,16 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
     private let remotePort: UInt16
 
     private var readHandler: (([Data]?, Error?) -> Void)?
+
+    private var outstandingReceives = 0
+
+    private var pendingDatagrams: [Data] = []
+
+    private var isFlushScheduled = false
+
+    private var isReceiving = false
+
+    private var queue: DispatchQueue?
 
     init(connection: NWConnection, maxDatagrams: Int = 200, xorMethod: OpenVPN.XORMethod?, remoteHost: String?, remotePort: UInt16) {
         self.connection = connection
@@ -118,23 +180,46 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
 
     func setReadHandler(queue: DispatchQueue, _ handler: @escaping ([Data]?, Error?) -> Void) {
         readHandler = handler
-        loopReadDatagrams()
+        self.queue = queue
+        isReceiving = true
+        armReceives()
     }
 
-    private func loopReadDatagrams() {
+    /// Tops the in-flight receives back up to `maxOutstandingReceives`.
+    private func armReceives() {
+        while isReceiving, outstandingReceives < Self.maxOutstandingReceives {
+            outstandingReceives += 1
+            receiveOneDatagram()
+        }
+    }
+
+    private func receiveOneDatagram() {
         connection.receiveMessage { [weak self] data, _, isComplete, error in
             // delivered on the connection queue (== read queue)
             guard let self else {
                 return
             }
+            self.outstandingReceives -= 1
+            guard self.isReceiving else {
+                return
+            }
+
             if let error {
+                if let nwError = error as? NWError, NWLinkErrorPolicy.isRecoverable(nwError) {
+                    log.debug("Recoverable datagram receive failure, continuing: \(error)")
+                    self.armReceives()
+                    return
+                }
+                self.stopReceiving()
+                self.flushPendingDatagrams()
                 self.readHandler?(nil, error)
                 return
             }
+
             if let data, !data.isEmpty {
-                let packets = self.xor.processPackets([data], outbound: false)
-                self.readHandler?(packets, nil)
+                self.pendingDatagrams.append(data)
             }
+
             // NOTE: for a UDP NWConnection, `isComplete` is true for EVERY
             // datagram (each datagram is one complete message), so it must NOT
             // be treated as end-of-connection the way TCP streams are. The
@@ -142,20 +227,53 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
             // AND isComplete (delivered on cancel/close); stop the loop then to
             // avoid re-arming forever on a dead connection.
             if isComplete && data == nil {
+                self.stopReceiving()
+                self.flushPendingDatagrams()
                 self.readHandler?(nil, NWLinkError.remoteClosed)
                 return
             }
-            // datagram semantics: one message per receive, no stack growth
-            // (completions are dispatched, not called synchronously)
-            self.loopReadDatagrams()
+
+            if self.pendingDatagrams.count >= Self.maxBatchedDatagrams {
+                self.flushPendingDatagrams()
+            } else {
+                self.scheduleFlush()
+            }
+            self.armReceives()
         }
+    }
+
+    /// Defers the flush by one queue turn so datagrams that already arrived are
+    /// handed to the session as a single batch, which lets the data path decrypt
+    /// them in one pass and write them to the tunnel in one call.
+    private func scheduleFlush() {
+        guard !isFlushScheduled, !pendingDatagrams.isEmpty, let queue else {
+            return
+        }
+        isFlushScheduled = true
+        queue.async { [weak self] in
+            self?.flushPendingDatagrams()
+        }
+    }
+
+    private func flushPendingDatagrams() {
+        isFlushScheduled = false
+        guard !pendingDatagrams.isEmpty else {
+            return
+        }
+        let datagrams = pendingDatagrams
+        pendingDatagrams.removeAll(keepingCapacity: true)
+        readHandler?(xor.processPackets(datagrams, outbound: false), nil)
+    }
+
+    private func stopReceiving() {
+        isReceiving = false
     }
 
     func writePacket(_ packet: Data, completionHandler: ((Error?) -> Void)?) {
         let dataToUse = xor.processPacket(packet, outbound: true)
         let completion = completionHandler.map(UncheckedSendableCallback.init)
         connection.send(content: dataToUse, completion: .contentProcessed { error in
-            completion?.callback(error)
+            completion?.callback(Self.sendFailure(error))
         })
     }
 
@@ -170,13 +288,17 @@ final class NWUDPLink: LinkInterface, @unchecked Sendable {
         connection.batch {
             for packet in packetsToUse {
                 connection.send(content: packet, completion: .contentProcessed { error in
-                    let outcome = batchCompletion.record(error)
+                    let outcome = batchCompletion.record(Self.sendFailure(error))
                     if outcome.isComplete {
                         completion?.callback(outcome.error)
                     }
                 })
             }
         }
+    }
+
+    private static func sendFailure(_ error: NWError?) -> Error? {
+        error.map { NWLinkErrorPolicy.classify($0, operation: "write") }
     }
 }
 
@@ -237,6 +359,11 @@ final class NWTCPLink: LinkInterface, @unchecked Sendable {
                 return
             }
             if let error {
+                if let nwError = error as? NWError, NWLinkErrorPolicy.isRecoverable(nwError) {
+                    log.debug("Recoverable stream receive failure, continuing: \(error)")
+                    self.loopReadStream()
+                    return
+                }
                 self.readHandler?(nil, error)
                 return
             }
@@ -272,7 +399,7 @@ final class NWTCPLink: LinkInterface, @unchecked Sendable {
         )
         let completion = completionHandler.map(UncheckedSendableCallback.init)
         connection.send(content: stream, completion: .contentProcessed { error in
-            completion?.callback(error)
+            completion?.callback(Self.sendFailure(error))
         })
     }
 
@@ -284,8 +411,12 @@ final class NWTCPLink: LinkInterface, @unchecked Sendable {
         )
         let completion = completionHandler.map(UncheckedSendableCallback.init)
         connection.send(content: stream, completion: .contentProcessed { error in
-            completion?.callback(error)
+            completion?.callback(Self.sendFailure(error))
         })
+    }
+
+    private static func sendFailure(_ error: NWError?) -> Error? {
+        error.map { NWLinkErrorPolicy.classify($0, operation: "write") }
     }
 }
 

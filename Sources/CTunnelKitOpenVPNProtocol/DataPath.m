@@ -69,6 +69,10 @@
 @property (nonatomic, copy) DataPathParseBlock parsePayloadBlock;
 @property (nonatomic, strong) id<CompressionProvider> lzo;
 
+@property (nonatomic, assign) uint64_t droppedInboundPackets;
+@property (nonatomic, assign) uint64_t droppedCompressedInboundPackets;
+@property (nonatomic, assign) uint64_t droppedReplayedInboundPackets;
+
 @end
 
 @implementation DataPath
@@ -172,6 +176,18 @@
     __weak DataPath *weakSelf = self;
 
     DataPathParseBlock parseCompressedBlock = ^BOOL(uint8_t * _Nonnull payload, NSInteger * _Nonnull payloadOffset, uint8_t * _Nonnull compressionHeader, NSInteger * _Nonnull headerLength, const uint8_t * _Nonnull packet, NSInteger packetLength, NSError * _Nullable __autoreleasing * _Nullable error) {
+
+        // the framing byte is read from `payload`, which sits at an offset
+        // inside `packet`: never read past the decrypted bytes, however
+        // truncated the packet is
+        const NSInteger payloadLength = packetLength - (payload - packet);
+        if (payloadLength < 1) {
+            if (error) {
+                *error = OpenVPNErrorWithCode(OpenVPNErrorCodeDataPathCompression);
+            }
+            return NO;
+        }
+
         *compressionHeader = payload[0];
         *headerLength = 1;
 
@@ -197,13 +213,24 @@
                 
             case DataPacketV2Indicator:
                 if (compressionFraming == CompressionFramingNativeCompressV2) {
+                    if (payloadLength < 2) {
+                        if (error) {
+                            *error = OpenVPNErrorWithCode(OpenVPNErrorCodeDataPathCompression);
+                        }
+                        return NO;
+                    }
                     if (payload[1] != DataPacketV2Uncompressed) {
                         if (error) {
                             *error = OpenVPNErrorWithCode(OpenVPNErrorCodeDataPathCompression);
                         }
                         return NO;
                     }
+                    // stub-v2 prepends TWO bytes (indicator + algorithm), so the
+                    // payload is two bytes shorter. Reporting a 1-byte header
+                    // here returned one trailing byte of foreign memory as part
+                    // of every v2-framed packet.
                     *payloadOffset = 2;
+                    *headerLength = 2;
                 } else {
                     *payloadOffset = 0;
                     *headerLength = 0;
@@ -345,27 +372,39 @@
     return self.outPackets;
 }
 
+// A single inbound packet that cannot be authenticated, decrypted or parsed is
+// DROPPED, never fatal. Datagram links reorder, duplicate and corrupt packets
+// as a matter of course, and a server may frame a packet in a way this client
+// cannot decode (e.g. LZO compression without an LZO provider). Aborting the
+// batch used to propagate up as a session shutdown, so one such packet killed
+// an otherwise healthy tunnel — reliably reproducible by saturating the link,
+// since bulk traffic is what makes these packets appear at all.
+//
+// The only genuinely fatal condition is exhausting the packet-id space, which
+// requires a renegotiation and is reported through `error`.
 - (NSArray<NSData *> *)decryptPackets:(NSArray<NSData *> *)packets keepAlive:(bool *)keepAlive error:(NSError *__autoreleasing *)error
 {
 //    NSAssert(self.encrypter.peerId == self.decrypter.peerId, @"Peer-id mismatch in DataPath encrypter/decrypter");
 
     [self.inPackets removeAllObjects];
-    
+
     for (NSData *encryptedDataPacket in packets) {
-        
+
         // may resize decBuffer to encryptedPacket.length
         [self adjustDecBufferToPacketSize:(int)encryptedDataPacket.length];
-        
+
         uint8_t *dataPacketBytes = self.decBufferAligned;
         NSInteger dataPacketLength = INT_MAX;
         uint32_t packetId;
+        NSError *packetError = nil;
         const BOOL success = [self.decrypter decryptDataPacket:encryptedDataPacket
                                                           into:dataPacketBytes
                                                         length:&dataPacketLength
                                                       packetId:&packetId
-                                                         error:error];
+                                                         error:&packetError];
         if (!success) {
-            return nil;
+            self.droppedInboundPackets += 1;
+            continue;
         }
         if (packetId > self.maxPacketId) {
             if (error) {
@@ -374,22 +413,29 @@
             return nil;
         }
         if (self.inReplay && [self.inReplay isReplayedPacketId:packetId]) {
+            self.droppedReplayedInboundPackets += 1;
             continue;
         }
-        
+
         uint8_t compressionHeader;
+        packetError = nil;
         NSData *payload = [self.decrypter parsePayloadWithBlock:self.parsePayloadBlock
                                               compressionHeader:&compressionHeader
                                                     packetBytes:dataPacketBytes
                                                    packetLength:dataPacketLength
-                                                          error:error];
+                                                          error:&packetError];
         if (!payload) {
-            return nil;
+            self.droppedInboundPackets += 1;
+            self.droppedCompressedInboundPackets += 1;
+            continue;
         }
         if (compressionHeader == DataPacketLZOCompress) {
-            payload = [self.lzo decompressedDataWithData:payload error:error];
+            packetError = nil;
+            payload = [self.lzo decompressedDataWithData:payload error:&packetError];
             if (!payload) {
-                return nil;
+                self.droppedInboundPackets += 1;
+                self.droppedCompressedInboundPackets += 1;
+                continue;
             }
         }
 
@@ -399,12 +445,12 @@
             }
             continue;
         }
-        
+
 //        MSSFix(payloadBytes, payloadLength);
-        
+
         [self.inPackets addObject:payload];
     }
-    
+
     return self.inPackets;
 }
 

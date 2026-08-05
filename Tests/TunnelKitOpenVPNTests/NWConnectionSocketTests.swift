@@ -169,6 +169,60 @@ final class NWConnectionSocketTests: XCTestCase {
         socket.shutdown()
     }
 
+    /// The receive loop keeps several receives in flight and coalesces what
+    /// arrives together. Neither may lose a datagram or reorder the stream: the
+    /// OpenVPN replay window only tolerates limited reordering.
+    func test_udp_pipelinedReceivesPreserveEveryDatagramInOrder() throws {
+        let server = try EchoServer(isStream: false)
+        defer { server.stop() }
+        let socket = makeSocket(port: server.port, reliable: false)
+        let recorder = DelegateRecorder()
+        socket.delegate = recorder
+
+        let active = expectation(description: "active")
+        recorder.onActive = { active.fulfill() }
+        socket.observe(queue: queue, activeTimeout: 3000)
+        wait(for: [active], timeout: 5)
+
+        let link = socket.link(userObject: nil)
+        let datagramCount = 300
+        // full-MTU payloads, tagged with a sequence number
+        let payloads: [Data] = (0..<datagramCount).map { index in
+            var payload = Data()
+            payload.append(UInt8(index >> 8))
+            payload.append(UInt8(index & 0xff))
+            payload.append(Data(repeating: 0x5a, count: 1_397))
+            return payload
+        }
+
+        let received = expectation(description: "received all")
+        let sequences = Locked<[Int]>([])
+        link.setReadHandler(queue: queue) { packets, error in
+            XCTAssertNil(error)
+            guard let packets else {
+                return
+            }
+            sequences.mutate { list in
+                for packet in packets where packet.count == 1_399 {
+                    list.append(Int(packet[0]) << 8 | Int(packet[1]))
+                }
+                if list.count >= datagramCount {
+                    received.fulfill()
+                }
+            }
+        }
+        for payload in payloads {
+            link.writePacket(payload, completionHandler: nil)
+        }
+        wait(for: [received], timeout: 20)
+
+        let observed = sequences.value
+        XCTAssertEqual(observed.count, datagramCount)
+        XCTAssertEqual(observed, observed.sorted(), "pipelined receives reordered datagrams")
+        XCTAssertEqual(Set(observed).count, datagramCount, "pipelined receives duplicated datagrams")
+        socket.shutdown()
+    }
+
     func test_udp_batchReportsSendFailureAfterConnectionCloses() throws {
         let server = try EchoServer(isStream: false)
         defer { server.stop() }

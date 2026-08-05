@@ -400,7 +400,10 @@ const NSInteger CryptoCBCMaxHMACLength = 100;
 {
     uint8_t *payload = packetBytes;
     payload += sizeof(uint32_t); // packet id
-    NSUInteger length = packetLength - (int)(payload - packetBytes);
+    NSInteger length = packetLength - (payload - packetBytes);
+    if (length < 0) {
+        return NULL;
+    }
     if (!block) {
         *compressionHeader = 0x00;
         return [NSData dataWithBytes:payload length:length];
@@ -412,6 +415,11 @@ const NSInteger CryptoCBCMaxHMACLength = 100;
         return NULL;
     }
     length -= payloadHeaderLength;
+
+    // a truncated packet must not underflow into a huge length
+    if (length < 0 || payloadOffset < 0 || payloadOffset + length > packetLength - (payload - packetBytes)) {
+        return NULL;
+    }
     return [NSData dataWithBytes:(payload + payloadOffset) length:length];
 }
 

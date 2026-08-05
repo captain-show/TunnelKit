@@ -206,6 +206,30 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
     /// `true` after a stop has started and before cleanup completes.
     public private(set) var isStopping: Bool
 
+    /// Recoverable link failures absorbed instead of stopping the session.
+    /// Queue-confined; reported by the keep-alive tick for diagnostics.
+    private var transientLinkReadFailures: UInt64 = 0
+
+    private var transientLinkWriteFailures: UInt64 = 0
+
+    /// Last reported values, so the tick only logs when something changed.
+    private var lastReportedDropStatistics = DropStatistics()
+
+    /// Keeps the compression-mismatch diagnosis to one line per session.
+    private var hasReportedCompressionMismatch = false
+
+    private struct DropStatistics: Equatable {
+        var transientReads: UInt64 = 0
+
+        var transientWrites: UInt64 = 0
+
+        var undecryptable: UInt64 = 0
+
+        var compression: UInt64 = 0
+
+        var replayed: UInt64 = 0
+    }
+
     /// Guards the single `deferStop` completion against double invocation.
     /// Queue-confined (only touched inside `deferStop` on `queue`).
     private var isStopCompleted = false
@@ -387,6 +411,10 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
         pingTimerGeneration &+= 1
         negotiationLoopGeneration &+= 1
         inboundPacketObserver.withLock { $0.observer = nil }
+        transientLinkReadFailures = 0
+        transientLinkWriteFailures = 0
+        lastReportedDropStatistics = DropStatistics()
+        hasReportedCompressionMismatch = false
     }
 
     func cleanupCache() {
@@ -459,6 +487,11 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
                 return
             }
             if let error = error {
+                guard !error.isTransientLinkFailure else {
+                    self.transientLinkReadFailures += 1
+                    log.debug("Recoverable LINK read failure, dropping packet: \(error)")
+                    return
+                }
                 log.error("Failed LINK read: \(error)")
 
                 // a dead link must not leave the session hanging until the
@@ -470,7 +503,6 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
             if let packets = newPackets, !packets.isEmpty {
                 self.maybeRenegotiate()
 
-//                log.verbose("Received \(packets.count) packets from LINK")
                 self.receiveLink(packets: packets)
             }
         }
@@ -494,7 +526,6 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
             }
 
             if let packets = newPackets, !packets.isEmpty {
-//                log.verbose("Received \(packets.count) packets from TUN")
                 self.receiveTunnel(packets: packets)
             }
         }
@@ -515,7 +546,6 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
             guard !isStopping else {
                 return
             }
-//            log.verbose("Received data from LINK (\(packet.count) bytes): \(packet.toHex())")
 
             guard let firstByte = packet.first else {
                 log.warning("Dropped malformed packet (missing opcode)")
@@ -526,7 +556,6 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
                 log.warning("Dropped malformed packet (unknown code: \(codeValue))")
                 continue
             }
-//            log.verbose("Parsed packet with code \(code)")
 
             var offset = 1
             if code == .dataV2 {
@@ -637,6 +666,8 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
             return
         }
 
+        reportDropStatistics()
+
         // is keep-alive enabled?
         if let _ = keepAliveInterval {
             log.debug("Send ping")
@@ -646,6 +677,48 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
 
         // schedule even just to check for ping timeout
         scheduleNextPing()
+    }
+
+    /**
+     Surfaces packets the data path dropped instead of stopping the session.
+
+     Dropping is the correct behavior, but silence would hide a real
+     misconfiguration (a server compressing traffic this client cannot decode,
+     a peer-id mismatch, a link that constantly overflows), so the counters are
+     logged whenever they move.
+     */
+    private func reportDropStatistics() {
+        let dataPath = currentKey?.dataPath
+        let current = DropStatistics(
+            transientReads: transientLinkReadFailures,
+            transientWrites: transientLinkWriteFailures,
+            undecryptable: dataPath?.droppedInboundPackets ?? 0,
+            compression: dataPath?.droppedCompressedInboundPackets ?? 0,
+            replayed: dataPath?.droppedReplayedInboundPackets ?? 0
+        )
+        guard current != lastReportedDropStatistics else {
+            return
+        }
+        lastReportedDropStatistics = current
+        log.info("""
+            Dropped packets so far: \(current.undecryptable) undecryptable \
+            (\(current.compression) compression), \(current.replayed) replayed, \
+            \(current.transientReads) recoverable reads, \
+            \(current.transientWrites) recoverable writes
+            """)
+
+        if current.compression > 0, !hasReportedCompressionMismatch {
+            hasReportedCompressionMismatch = true
+            log.error("""
+                The server is sending compressed data packets that this client \
+                cannot decompress (framing: \
+                \(pushReply?.options.compressionFraming ?? configuration.fallbackCompressionFraming), \
+                algorithm: \(pushReply?.options.compressionAlgorithm ?? configuration.compressionAlgorithm ?? .disabled)). \
+                Such packets are dropped, which degrades throughput: disable \
+                compression server-side (comp-lzo no / compress stub) or build \
+                with an LZO provider.
+                """)
+        }
     }
 
     private func scheduleNextPing() {
@@ -1221,7 +1294,12 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
                     log.warning("Ignoring write from outdated LINK")
                     return
                 }
-                if let error = error {
+                if let error {
+                    guard !error.isTransientLinkFailure else {
+                        self.transientLinkWriteFailures += 1
+                        log.debug("Recoverable LINK write failure during control flush, dropping: \(error)")
+                        return
+                    }
                     log.error("Failed LINK write during control flush: \(error)")
                     self.deferStop(.reconnect, self.linkFailure(operation: "control-write", underlying: error))
                     return
@@ -1314,7 +1392,7 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
             peerId: pushReply.options.peerId ?? PacketPeerIdDisabled,
             compressionFraming: (pushedFraming ?? configuration.fallbackCompressionFraming).native,
             compressionAlgorithm: (pushedCompression ?? configuration.compressionAlgorithm ?? .disabled).native,
-            maxPackets: link?.packetBufferSize ?? 200,
+            maxPackets: min(link?.packetBufferSize ?? 200, 1000),
             usesReplayProtection: CoreConfiguration.OpenVPN.usesReplayProtection
         )
         return true
@@ -1388,11 +1466,15 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
                         return
                     }
                     if let error = error {
+                        guard !error.isTransientLinkFailure else {
+                            self.transientLinkWriteFailures += 1
+                            log.debug("Data: Recoverable LINK write failure, dropping packet: \(error)")
+                            return
+                        }
                         log.error("Data: Failed LINK write during send data: \(error)")
                         self.deferStop(.reconnect, self.linkFailure(operation: "data-write", underlying: error))
                         return
                     }
-//                    log.verbose("Data: \(encryptedPackets.count) packets successfully written to LINK")
                 }
             }
         } catch {
@@ -1437,6 +1519,11 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
                     return
                 }
                 if let error = error {
+                    guard !error.isTransientLinkFailure else {
+                        self.transientLinkWriteFailures += 1
+                        log.debug("Recoverable LINK write failure for ack \(controlPacket.packetId), dropping: \(error)")
+                        return
+                    }
                     log.error("Failed LINK write during send ack for packetId \(controlPacket.packetId): \(error)")
                     self.deferStop(.reconnect, self.linkFailure(operation: "ack-write", underlying: error))
                     return
