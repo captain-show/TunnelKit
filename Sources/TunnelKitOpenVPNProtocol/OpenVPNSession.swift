@@ -218,6 +218,13 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
     /// Keeps the compression-mismatch diagnosis to one line per session.
     private var hasReportedCompressionMismatch = false
 
+    /// Nesting depth of data-path deliveries. Queue-confined. See `deliverLink`.
+    private var dataPathDepth = 0
+
+    private var reentrantDeliveries: UInt64 = 0
+
+    private var hasReportedReentrantDelivery = false
+
     private struct DropStatistics: Equatable {
         var transientReads: UInt64 = 0
 
@@ -228,6 +235,8 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
         var compression: UInt64 = 0
 
         var replayed: UInt64 = 0
+
+        var reentrant: UInt64 = 0
     }
 
     /// Guards the single `deferStop` completion against double invocation.
@@ -415,6 +424,9 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
         transientLinkWriteFailures = 0
         lastReportedDropStatistics = DropStatistics()
         hasReportedCompressionMismatch = false
+        dataPathDepth = 0
+        reentrantDeliveries = 0
+        hasReportedReentrantDelivery = false
     }
 
     func cleanupCache() {
@@ -503,7 +515,7 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
             if let packets = newPackets, !packets.isEmpty {
                 self.maybeRenegotiate()
 
-                self.receiveLink(packets: packets)
+                self.deliverLink(packets: packets)
             }
         }
     }
@@ -526,9 +538,67 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
             }
 
             if let packets = newPackets, !packets.isEmpty {
-                self.receiveTunnel(packets: packets)
+                self.deliverTunnel(packets: packets)
             }
         }
+    }
+
+    // MARK: Data-path reentrancy
+
+    /**
+     Runs a data-path batch only when nothing else is already running one.
+
+     Both transports can invoke a completion INLINE, on the stack of the very
+     call that armed it: `NWConnection` when a datagram is already buffered, and
+     `NEPacketTunnelFlow` when the utun already has packets queued. Processing a
+     batch at depth > 0 therefore stacks a whole encrypt-or-decrypt chain per
+     level, and with a saturated link in both directions that has been observed
+     to exhaust the 512 KB GCD worker stack — the crash lands wherever the guard
+     page is first touched, which is misleadingly far from the recursion.
+
+     Rather than guess which callback re-enters, deliveries at depth > 0 are
+     re-queued. Correctness is unaffected (the batch is still processed, in
+     order, on the same queue) and the stack stays bounded whatever the
+     frameworks do. The first occurrence is logged so the culprit is named.
+     */
+    private func deliverLink(packets: [Data]) {
+        guard dataPathDepth == 0 else {
+            reportReentrantDelivery(on: "LINK")
+            queue.async { [weak self] in
+                self?.deliverLink(packets: packets)
+            }
+            return
+        }
+        dataPathDepth += 1
+        defer { dataPathDepth -= 1 }
+        receiveLink(packets: packets)
+    }
+
+    private func deliverTunnel(packets: [Data]) {
+        guard dataPathDepth == 0 else {
+            reportReentrantDelivery(on: "TUN")
+            queue.async { [weak self] in
+                self?.deliverTunnel(packets: packets)
+            }
+            return
+        }
+        dataPathDepth += 1
+        defer { dataPathDepth -= 1 }
+        receiveTunnel(packets: packets)
+    }
+
+    private func reportReentrantDelivery(on interface: String) {
+        reentrantDeliveries += 1
+        guard !hasReportedReentrantDelivery else {
+            return
+        }
+        hasReportedReentrantDelivery = true
+        log.error("""
+            \(interface) delivery re-entered the data path at depth \
+            \(dataPathDepth); re-queueing it to keep the stack bounded. This is \
+            the transport invoking a completion inline — expect further \
+            occurrences, counted and reported with the drop statistics.
+            """)
     }
 
     // Ruby: recv_link
@@ -694,7 +764,8 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
             transientWrites: transientLinkWriteFailures,
             undecryptable: dataPath?.droppedInboundPackets ?? 0,
             compression: dataPath?.droppedCompressedInboundPackets ?? 0,
-            replayed: dataPath?.droppedReplayedInboundPackets ?? 0
+            replayed: dataPath?.droppedReplayedInboundPackets ?? 0,
+            reentrant: reentrantDeliveries
         )
         guard current != lastReportedDropStatistics else {
             return
@@ -704,7 +775,8 @@ public final class OpenVPNSession: Session, @unchecked Sendable {
             Dropped packets so far: \(current.undecryptable) undecryptable \
             (\(current.compression) compression), \(current.replayed) replayed, \
             \(current.transientReads) recoverable reads, \
-            \(current.transientWrites) recoverable writes
+            \(current.transientWrites) recoverable writes, \
+            \(current.reentrant) re-queued reentrant deliveries
             """)
 
         if current.compression > 0, !hasReportedCompressionMismatch {
