@@ -41,11 +41,21 @@ import SwiftyBeaver
 
 private let log = SwiftyBeaver.self
 
-private final class UncheckedSendableCallback<Callback>: @unchecked Sendable {
-    let callback: Callback
+/// Carries the read handler across the `NEPacketTunnelFlow` completion boundary.
+///
+/// The stored function type is CONCRETE on purpose. A generic box would hold it
+/// in Swift's maximally abstract convention, so every box/unbox round trip would
+/// insert a pair of reabstraction thunks — and the read loop below re-arms once
+/// per batch, which made those thunks accumulate permanently. After N batches,
+/// invoking the handler cost 2N stack frames; a saturated tunnel reaches tens of
+/// thousands of batches and walks straight off the 512 KB GCD worker stack. The
+/// crash then lands in whatever function next touches a fresh stack page, which
+/// is nowhere near this file.
+private final class ReadHandlerBox: @unchecked Sendable {
+    let handle: ([Data]?, Error?) -> Void
 
-    init(_ callback: Callback) {
-        self.callback = callback
+    init(_ handle: @escaping ([Data]?, Error?) -> Void) {
+        self.handle = handle
     }
 }
 
@@ -74,12 +84,15 @@ public class NETunnelInterface: TunnelInterface {
     // MARK: IOInterface
 
     public func setReadHandler(queue: DispatchQueue, _ handler: @escaping ([Data]?, Error?) -> Void) {
-        loopReadPackets(queue, handler)
+        // boxed exactly once, for the lifetime of the loop
+        loopReadPackets(queue, ReadHandlerBox(handler))
     }
 
-    private func loopReadPackets(_ queue: DispatchQueue, _ handler: @escaping ([Data]?, Error?) -> Void) {
+    /// Re-arms by passing the SAME box along — a class reference, so no wrapping
+    /// and no reabstraction happens per iteration. Re-boxing here instead would
+    /// grow the handler by two thunk layers on every batch; see `ReadHandlerBox`.
+    private func loopReadPackets(_ queue: DispatchQueue, _ callback: ReadHandlerBox) {
         let interface = WeakReference(self)
-        let callback = UncheckedSendableCallback(handler)
 
         // WARNING: runs in NEPacketTunnelFlow queue
         impl?.readPackets { packets, _ in
@@ -87,8 +100,8 @@ public class NETunnelInterface: TunnelInterface {
                 guard let interface = interface.value else {
                     return
                 }
-                interface.loopReadPackets(queue, callback.callback)
-                callback.callback(packets, nil)
+                interface.loopReadPackets(queue, callback)
+                callback.handle(packets, nil)
             }
         }
     }
